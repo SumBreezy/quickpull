@@ -13,7 +13,15 @@ remembers it for every car like it, and tells the yard where the car goes: **Pul
 2. Models already in the database get their destination instantly. New models are gathered in the background (about 62 eBay lookups each, under eBay's 5,000-a-day limit).
 3. The owner opens any car to see its **pull sheet**: tracked parts plus anything else of value eBay shows for that model ("Also found"). Parts under the cutoff ($60 to start) are hidden, never deleted.
 4. Pulled parts get a grade (A/B/C) and a bin (A–H by part type) and move through **Shelf** → Listed → Sold.
-5. In spare time, **Research** lists your most common models. Open eBay's sold listings, copy the page, paste it in. That one paste covers every part on that model, and you can apply it to a range of years.
+5. In spare time, **Research** lists your most common models. Open eBay's sold listings (or Terapeak), copy the page, paste it in. You can paste several pages at once.
+   - **Every sale is kept for good, small and large parts.** Small parts feed the pull sheets. Large parts (engines, transmissions, doors, wheels…) are saved for when you start selling them.
+   - Each paste **adds to** what's saved, and the same sale is never saved twice. Terapeak pastes ask for the date range you used, so the "sold per 90 days" numbers stay accurate.
+   - Save for a range of years so one paste covers a whole generation.
+
+## Updating after a code change
+- **App page changes** (`index.html`) go live by themselves about a minute after they're on GitHub.
+- **Server changes** (`supabase/functions/ebay-lookup/index.ts`) need a redeploy: copy the file from GitHub, paste it over the code in Supabase → Edge Functions → ebay-lookup, and click **Deploy**.
+- **Database changes** (`supabase/schema.sql`): paste the whole file into the SQL Editor and click **Run**. It's safe to run again and never deletes data.
 
 ## One-time setup (about 20 minutes)
 

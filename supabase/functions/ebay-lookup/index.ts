@@ -201,7 +201,7 @@ export function priceStats(prices: number[]) {
   return { low: r(q(0.25)), median: r(q(0.5)), high: r(q(0.75)), n: a.length };
 }
 
-type Listing = { title: string; price: number; qty?: number; ship?: number | null; category?: string };
+type Listing = { title: string; price: number; qty?: number; ship?: number | null; category?: string; date?: string };
 
 // Turns a pile of listings for one vehicle into per-part stats (tracked parts + newly discovered ones)
 export function aggregate(listings: Listing[], v: { make?: string; model?: string }, opts: { keepTracked: boolean; requireModel?: boolean }) {
@@ -245,13 +245,18 @@ const PRICE = /^\$\s?([\d,]+(?:\.\d{2})?)(?:\s+to\s+\$[\d,.]+)?$/;
 const MONEY = /\$\s?([\d,]+(?:\.\d{2})?)/;
 const SHIP = /(shipping|delivery|postage)/i;
 const SOLD_DATE = /^sold\s+(?:on\s+)?([a-z]{3,9}\.? \d{1,2},? \d{4})/i;
+export function toIsoDate(s: string): string | undefined {
+  if (!s) return undefined;
+  const d = new Date(String(s).replace(/\./g, ""));
+  return isNaN(d.getTime()) ? undefined : d.toISOString().slice(0, 10);
+}
 export function parsePaste(text: string): Listing[] {
   const lines = String(text || "").replace(/\r/g, "").split("\n").map((s) => s.trim()).filter(Boolean);
   const out: Listing[] = [];
   const seen = new Set<string>(); // the same sale pasted twice (overlapping pages) only counts once
   let cur: { title: string; price?: number; ship?: number | null } | null = null;
   let date = "", skipping = false;
-  const keep = (l: Listing, d: string) => { const k = `${l.title.toLowerCase()}|${l.price}|${d}`; if (seen.has(k)) return; seen.add(k); out.push(l); };
+  const keep = (l: Listing, d: string) => { const k = `${l.title.toLowerCase()}|${l.price}|${d}`; if (seen.has(k)) return; seen.add(k); out.push({ ...l, date: toIsoDate(d) }); };
   const push = () => { if (cur && cur.price) keep({ title: cur.title, price: cur.price, qty: 1, ship: cur.ship ?? null }, date); cur = null; };
   for (const raw of lines) {
     // eBay's loose matches are other vehicles: skip them until the next pasted page starts
@@ -606,33 +611,158 @@ async function platformData(platform: string) {
   return { platform, platform_info: plat?.[0] || null, parts, part_min: s.part_min };
 }
 
-async function researchPreview(text: string, v: any) {
-  const listings = parsePaste(text);
-  const { groups, excluded } = aggregate(listings, v, { keepTracked: true, requireModel: true });
-  return {
-    read: listings.length, excluded,
-    groups: groups.filter((g) => g.stats).map((g) => ({ key: g.key, name: g.key.startsWith("d:") ? g.name : PART[g.key]?.[1] || g.key, count: g.count, ...g.stats, titles: g.titles }))
-      .sort((a, b) => (b.high ?? 0) - (a.high ?? 0)),
-  };
+// ---------- Every sale you paste is kept: small parts feed pull sheets, large parts are saved for later ----------
+const LARGE: [string, string, RegExp][] = [
+  ["engine", "Engine assembly", /\b(engine|motor) (assembly|assy)|\blong block|\bshort block|\bengine\b(?! (control|computer|module|wiring|harness|mount|cover|sensor))|\bmotor \d\.\d/],
+  ["transmission", "Transmission", /\btransmission\b(?! (control|computer|module|mount|cooler|line|solenoid|valve body))|\btransaxle/],
+  ["transfer_case", "Transfer case", /\btransfer case\b(?! (motor|module|switch))/],
+  ["differential", "Differential / axle assembly", /\bdifferential|\b(rear|front) axle (assembly|housing)|\bcarrier assembly/],
+  ["cv_axle", "Axle shaft / CV axle", /\b(cv )?axle shaft|\bcv axle|\bhalf ?shaft|\bdrive ?shaft/],
+  ["door", "Door", /\bdoor (shell|assembly|assy)|\b(front|rear)( left| right| driver| passenger| lh| rh)* door\b(?! (handle|lock|latch|switch|panel|trim|speaker|mirror|glass|regulator|motor|actuator|hinge|seal|module))/],
+  ["hood", "Hood", /\bhood\b(?! (latch|release|cable|strut|hinge|insulation|ornament))/],
+  ["liftgate", "Trunk lid / liftgate / tailgate", /\b(trunk lid|deck ?lid|lift ?gate|tail ?gate|hatch)\b(?! (module|motor|strut|handle|latch|switch|camera|light|lamp|emblem|badge))/],
+  ["fender", "Fender", /\bfender\b(?! (liner|flare|trim|emblem|badge))/],
+  ["bumper", "Bumper", /\bbumper\b(?! (sensor|bracket|reinforcement absorber))/],
+  ["quarter", "Quarter panel / body section", /\bquarter panel|\bbody section|\brocker panel|\broof (panel|skin)/],
+  ["grille", "Grille", /\bgrille?\b/],
+  ["radiator", "Radiator / condenser / fan", /\bradiator\b(?! (cap|hose|support))|\bcondenser|\bcooling fan|\bfan (assembly|shroud)|\bintercooler/],
+  ["seat", "Seat", /\bseats?\b(?! ?(belt|entertainment|switch|module|heater|heat|motor|track|buckle|control|memory|cover))/],
+  ["wheel", "Wheel / rim", /\bwheels?\b(?! (speed|bearing|hub|cap|center|lug|well|arch|liner|sensor|control|opening))|\brims?\b/],
+  ["tire", "Tire", /\btires?\b(?! pressure)/],
+  ["steering", "Steering column / rack / wheel", /\bsteering (column|rack|gear|wheel)\b(?! (control|button|switch|audio))|\brack and pinion/],
+  ["alternator", "Alternator", /\balternator/],
+  ["starter", "Starter", /\bstarter( motor)?\b/],
+  ["ac_compressor", "A/C compressor", /\ba\/?c compressor|\bac compressor|\bcompressor\b/],
+  ["ps_pump", "Power steering pump", /\bpower steering pump/],
+  ["suspension", "Suspension (strut, control arm, knuckle)", /\bstruts?\b|\bshocks?\b|\bcontrol arm|\bknuckle|\bspindle|\bcoil spring|\bleaf spring|\bsubframe|\bcrossmember|\bsway bar/],
+  ["exhaust", "Exhaust / catalytic converter", /\bexhaust|\bcatalytic|\bmuffler|\bresonator/],
+  ["intake", "Intake manifold / cylinder head / turbo", /\bintake manifold|\bcylinder head|\bturbo|\bsupercharger|\bvalve cover|\boil pan/],
+  ["fuel_tank", "Fuel tank / fuel pump", /\b(fuel|gas) tank|\bfuel pump\b(?! (driver|control|module))/],
+  ["glass", "Glass / windshield", /\bwindshield\b(?! (camera|sensor|washer))|\bglass\b|\bsunroof (glass|assembly|panel)/],
+  ["dash", "Dashboard / console / interior trim", /\bdashboard|\bdash (panel|pad|assembly)|\bcenter console|\bdoor (trim )?panel|\bheadliner|\bcarpet|\binterior trim/],
+  ["harness", "Wiring harness", /\bwiring harness|\bharness\b/],
+];
+const NO_STORE = /\b(air ?bags?|srs (module|bag)|inflator)\b/; // airbags can't be sold on eBay
+
+export function saleType(title: string, ship?: number | null, v: any = {}) {
+  const t = ` ${title.toLowerCase()} `;
+  if (NO_STORE.test(t)) return null;
+  const k = classify(title);
+  if (k) return { key: k, name: (PART[baseKey(k)] || PART[baseKey(k) + "_l"])?.[1]?.replace(/, (driver|passenger)$/, "") || baseKey(k), size: "small" };
+  for (const [key, name, re] of LARGE) if (re.test(t)) return { key: "big:" + key, name, size: "big" };
+  const nm = discoverName(title, v);
+  if (!nm) return null;
+  const slug = nm.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  if (isBig(title) || (ship != null && ship > BIG_SHIPPING)) return { key: "big:" + slug, name: nm, size: "big" };
+  return { key: "d:" + slug, name: nm, size: "small" };
 }
-async function researchSave(text: string, v: any, yearFrom: number, yearTo: number) {
-  const prev = await researchPreview(text, v);
-  if (!prev.groups.length) return { ...prev, saved_years: [] };
-  const years: number[] = [];
-  for (let y = Math.min(yearFrom, yearTo); y <= Math.max(yearFrom, yearTo) && years.length < 15; y++) years.push(y);
-  const { part_min } = await settings();
-  for (const y of years) {
-    const platform = platformKey({ ...v, year: y });
-    const rows = prev.groups.map((g) => ({
-      platform, part_key: g.key, sold_count: g.count, sold_low: g.low, sold_median: g.median, sold_high: g.high, sold_source: "manual", sold_updated: nowIso(),
-      part_name: g.key.startsWith("d:") ? g.name : PART[g.key]?.[1] ?? g.name, group_name: g.key.startsWith("d:") ? "Also found" : PART[g.key]?.[5] ?? null,
-      discovered: g.key.startsWith("d:"), sample_titles: g.titles,
-    }));
-    await rest("POST", "pm_part_stats?on_conflict=platform,part_key", rows, "resolution=merge-duplicates,return=minimal");
-    await rest("POST", "pm_platforms?on_conflict=platform", [{ platform, year: String(y), make: v.make, model: v.model, researched_at: nowIso() }], "resolution=merge-duplicates,return=minimal");
-    await finalizePlatform(platform, part_min);
+export const modelKey = (v: any) => platformKey({ make: v.make, model: v.model, year: "" }).replace(/\|$/, "");
+
+function readPaste(text: string, v: any) {
+  const listings = parsePaste(text);
+  const modelWord = String(v.model || "").toLowerCase().split(/[\s-]+/)[0];
+  const excluded = { junk: 0, other_vehicle: 0, airbag_or_unknown: 0 };
+  const sales: (Listing & { type: { key: string; name: string; size: string } })[] = [];
+  for (const l of listings) {
+    if (modelWord && !l.title.toLowerCase().includes(modelWord)) { excluded.other_vehicle++; continue; }
+    if (isJunk(l.title)) { excluded.junk++; continue; }
+    const type = saleType(l.title, l.ship, v);
+    if (!type) { excluded.airbag_or_unknown++; continue; }
+    sales.push({ ...l, type });
   }
-  return { ...prev, saved_years: years };
+  return { read: listings.length, excluded, sales };
+}
+function summarize(sales: any[], scale = (s: any) => Number(s.qty || 1)) {
+  const g = new Map<string, { key: string; name: string; size: string; count: number; prices: number[]; titles: string[]; last?: string }>();
+  for (const s of sales) {
+    const key = s.type ? s.type.key.replace(/_(l|r|x)$/, "") : String(s.part_key || "").replace(/_(l|r|x)$/, "");
+    const x = g.get(key) || { key, name: s.type?.name || s.part_name, size: s.type?.size || s.size, count: 0, prices: [], titles: [] };
+    x.count += scale(s);
+    for (let i = 0; i < Math.min(20, Math.max(1, Math.round(Number(s.qty || 1)))); i++) x.prices.push(Number(s.price));
+    if (x.titles.length < 3 && s.title) x.titles.push(String(s.title).slice(0, 120));
+    const d = s.date || s.sold_on; if (d && (!x.last || d > x.last)) x.last = d;
+    g.set(key, x);
+  }
+  return [...g.values()].map((x) => ({ key: x.key, name: x.name, size: x.size, count: Math.round(x.count * 10) / 10, last: x.last || null, titles: x.titles, ...(priceStats(x.prices) || {}) }))
+    .sort((a: any, b: any) => (b.high ?? 0) * b.count - (a.high ?? 0) * a.count);
+}
+
+async function researchPreview(text: string, v: any) {
+  const r = readPaste(text, v);
+  const groups = summarize(r.sales);
+  return { read: r.read, excluded: r.excluded, sales: r.sales.length, small: groups.filter((g) => g.size === "small"), big: groups.filter((g) => g.size === "big") };
+}
+
+// Rebuild one model year's sold numbers from every saved sale that fits it
+async function rebuildPlatformFromSales(v: any, year: number) {
+  const mk = modelKey(v);
+  const since = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10);
+  const rows = (await rest("GET", `pm_sales?model_key=eq.${enc(mk)}&size=eq.small&year_from=lte.${year}&year_to=gte.${year}&or=(sold_on.gte.${since},sold_on.is.null)&select=part_key,part_name,title,price,qty,period_days,sold_on,pasted_at&limit=20000`)) || [];
+  const now = Date.now();
+  const recent = (r: any, days: number) => now - new Date(r.sold_on || r.pasted_at).getTime() <= days * 864e5;
+  const perKey = new Map<string, any[]>();
+  for (const r of rows) {
+    // Terapeak rows are totals over a period; eBay rows are single sales with a date
+    if (!recent(r, 180)) continue; // prices from the last 6 months
+    const keys = /_x$/.test(r.part_key) ? [r.part_key.replace(/_x$/, "_l"), r.part_key.replace(/_x$/, "_r")] : [r.part_key];
+    for (const k of keys) perKey.set(k, [...(perKey.get(k) || []), { ...r, half: keys.length > 1 }]);
+  }
+  const platform = platformKey({ ...v, year });
+  const out: any[] = [];
+  for (const [key, list] of perKey) {
+    let count = 0; const prices: number[] = []; const titles: string[] = [];
+    for (const r of list) {
+      const w = r.half ? 0.5 : 1;
+      if (r.period_days) count += (Number(r.qty) * 90 / Number(r.period_days)) * w;
+      else if (recent(r, 90)) count += Number(r.qty || 1) * w;
+      for (let i = 0; i < Math.min(20, Math.max(1, Math.round(Number(r.qty || 1)))); i++) prices.push(Number(r.price));
+      if (titles.length < 3) titles.push(String(r.title).slice(0, 120));
+    }
+    const st = priceStats(prices);
+    if (!st) continue;
+    const disc = key.startsWith("d:");
+    out.push({ platform, part_key: key, sold_count: Math.round(count * 10) / 10, sold_low: st.low, sold_median: st.median, sold_high: st.high, sold_source: "manual", sold_updated: nowIso(),
+      part_name: disc ? list[0].part_name : PART[key]?.[1] ?? list[0].part_name, group_name: disc ? "Also found" : PART[key]?.[5] ?? null, discovered: disc, sample_titles: titles });
+  }
+  if (out.length) await rest("POST", "pm_part_stats?on_conflict=platform,part_key", out, "resolution=merge-duplicates,return=minimal");
+  await rest("POST", "pm_platforms?on_conflict=platform", [{ platform, year: String(year), make: v.make, model: v.model, researched_at: nowIso() }], "resolution=merge-duplicates,return=minimal");
+  return platform;
+}
+
+async function researchSave(text: string, v: any, yearFrom: number, yearTo: number, periodDays: number | null, who: any) {
+  const r = readPaste(text, v);
+  const y1 = Math.min(yearFrom, yearTo), y2 = Math.max(yearFrom, yearTo);
+  const mk = modelKey(v);
+  const tp = !!periodDays;
+  const rows = r.sales.map((s) => ({
+    model_key: mk, make: v.make, model: v.model, year_from: y1, year_to: y2,
+    title: s.title, price: s.price, qty: s.qty || 1, period_days: tp ? periodDays : null, sold_on: s.date || null, ship: s.ship ?? null,
+    part_key: s.type.key, part_name: s.type.name, size: s.type.size, source: tp ? "terapeak" : "ebay-sold",
+    // eBay rows are single sales: same title+price+date = same sale. Terapeak rows are running totals: the newest paste wins.
+    dedupe_key: tp ? `${mk}|tp|${s.title.toLowerCase()}` : `${mk}|${s.title.toLowerCase()}|${s.price}|${s.date || ""}`,
+    ...(who?.id && who.id !== "cron" ? { pasted_by: who.id } : {}),
+  }));
+  let added = 0;
+  for (let i = 0; i < rows.length; i += 500) {
+    const chunk = rows.slice(i, i + 500);
+    const res = await rest("POST", "pm_sales?on_conflict=dedupe_key", chunk, tp ? "resolution=merge-duplicates,return=representation" : "resolution=ignore-duplicates,return=representation");
+    added += (res || []).length;
+  }
+  const { part_min } = await settings();
+  const years: number[] = [];
+  for (let y = y1; y <= y2 && years.length < 15; y++) { const p = await rebuildPlatformFromSales(v, y); await finalizePlatform(p, part_min); years.push(y); }
+  const groups = summarize(r.sales);
+  return { read: r.read, excluded: r.excluded, saved: added, already_saved: rows.length - added, saved_years: years,
+    small: groups.filter((g) => g.size === "small").length, big: groups.filter((g) => g.size === "big").length };
+}
+
+// Everything ever saved for a model, small and large
+async function modelSales(v: any) {
+  const mk = modelKey(v);
+  const rows = (await rest("GET", `pm_sales?model_key=eq.${enc(mk)}&select=part_key,part_name,size,title,price,qty,period_days,sold_on,year_from,year_to&order=sold_on.desc.nullslast&limit=20000`)) || [];
+  const all = summarize(rows);
+  const years = rows.length ? [Math.min(...rows.map((r: any) => r.year_from)), Math.max(...rows.map((r: any) => r.year_to))] : null;
+  return { total_sales: rows.reduce((n: number, r: any) => n + Number(r.qty || 1), 0), years, small: all.filter((g) => g.size === "small"), big: all.filter((g) => g.size === "big") };
 }
 
 async function recomputeAll() {
@@ -665,7 +795,8 @@ export async function handle(req: Request): Promise<Response> {
       case "car": return owner ? json(await carData(Number(body.id))) : ownerOnly();
       case "platform": return owner ? json(await platformData(String(body.platform || ""))) : ownerOnly();
       case "research_preview": return owner ? json(await researchPreview(String(body.text || ""), body.vehicle || {})) : ownerOnly();
-      case "research_save": return owner ? json(await researchSave(String(body.text || ""), body.vehicle || {}, Number(body.year_from), Number(body.year_to))) : ownerOnly();
+      case "research_save": return owner ? json(await researchSave(String(body.text || ""), body.vehicle || {}, Number(body.year_from), Number(body.year_to), Number(body.period_days) || null, who)) : ownerOnly();
+      case "model_sales": return owner ? json(await modelSales(body.vehicle || {})) : ownerOnly();
       case "recompute": return owner ? json(await recomputeAll()) : ownerOnly();
       default: return json({ error: "Unknown action." }, 400);
     }

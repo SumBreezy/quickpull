@@ -98,6 +98,34 @@ create index if not exists pm_items_status   on pm_items (status, created_at des
 create index if not exists pm_items_platform on pm_items (platform, part_key);
 
 ------------------------------------------------------------------
+-- Every sold listing you paste in Research, small AND large parts, kept for good.
+-- Small parts feed the pull sheets; large parts are saved for when you sell them too.
+------------------------------------------------------------------
+create table if not exists pm_sales (
+  id          bigint generated always as identity primary key,
+  model_key   text not null,           -- make|model
+  make        text,
+  model       text,
+  year_from   int,                     -- the years you said this paste covers
+  year_to     int,
+  title       text not null,
+  price       numeric not null,
+  qty         numeric not null default 1,
+  period_days int,                     -- Terapeak rows: totals over this many days
+  sold_on     date,
+  ship        numeric,
+  part_key    text,
+  part_name   text,
+  size        text,                    -- small | big
+  source      text,                    -- ebay-sold | terapeak
+  dedupe_key  text not null unique,    -- the same sale pasted twice is saved once
+  pasted_at   timestamptz not null default now(),
+  pasted_by   uuid default auth.uid()
+);
+create index if not exists pm_sales_model on pm_sales (model_key, size, year_from, year_to);
+create index if not exists pm_sales_part  on pm_sales (part_key);
+
+------------------------------------------------------------------
 -- Settings, eBay usage, and who is who
 ------------------------------------------------------------------
 create table if not exists pm_settings (
@@ -171,6 +199,7 @@ alter table pm_vehicles   enable row level security;
 alter table pm_platforms  enable row level security;
 alter table pm_part_stats enable row level security;
 alter table pm_items      enable row level security;
+alter table pm_sales      enable row level security;
 alter table pm_settings   enable row level security;
 alter table pm_usage      enable row level security;
 alter table pm_people     enable row level security;
@@ -183,6 +212,7 @@ drop policy if exists "owner" on pm_vehicles;
 drop policy if exists "owner" on pm_platforms;
 drop policy if exists "owner" on pm_part_stats;
 drop policy if exists "owner" on pm_items;
+drop policy if exists "owner" on pm_sales;
 drop policy if exists "owner" on pm_settings;
 drop policy if exists "owner" on pm_usage;
 drop policy if exists "owner" on pm_people;
@@ -192,6 +222,7 @@ create policy "owner" on pm_vehicles   for all to authenticated using (pm_is_own
 create policy "owner" on pm_platforms  for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_part_stats for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_items      for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
+create policy "owner" on pm_sales      for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_settings   for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_usage      for select to authenticated using (pm_is_owner());
 create policy "owner" on pm_people     for select to authenticated using (pm_is_owner());

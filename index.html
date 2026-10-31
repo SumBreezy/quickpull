@@ -288,25 +288,36 @@ function vResearch(){
   <div class="kpis"><div class="kpi"><span class="label">Models</span><b>${plats.length}</b></div><div class="kpi"><span class="label">Researched</span><b>${done}</b></div><div class="kpi"><span class="label">To do</span><b>${plats.length-done}</b></div></div>
   ${plats.length?`<div class="panel list">${plats.map(p=>`<div class="item"><div><b>${esc(vName(p))}</b><div class="small muted">${p.cars} car${p.cars>1?'s':''} bought · ${p.info?.researched_at?'researched '+ago(p.info.researched_at):'not researched'}</div></div><button class="btn sm ${p.info?.researched_at?'quiet':''}" data-act="research" data-p="${esc(p.platform)}">Research</button></div>`).join('')}</div>`:`<div class="panel empty"><p class="muted">Check in some cars first.</p></div>`}`;
 }
+const SOURCES=[['ebay','eBay sold page (last 90 days)',null],['tp90','Terapeak · last 90 days',90],['tp180','Terapeak · last 6 months',182],['tp365','Terapeak · last year',365],['tp730','Terapeak · last 2 years',730],['tp1095','Terapeak · last 3 years',1095]];
+function salesTable(list,big){
+  if(!list.length) return `<p class="panel-b muted small">None yet.</p>`;
+  return `<div style="overflow-x:auto"><table class="pt"><thead><tr><th>Part</th><th>Sold</th><th>Rough</th><th>Typical</th><th>Clean</th>${list[0].last!==undefined?'<th>Last sold</th>':''}</tr></thead><tbody>${list.map(g=>`<tr><td>${esc(g.name)}${!big&&g.key.startsWith('d:')?' <span class="chip steady" style="font-size:.7rem">new</span>':''}</td><td class="mono">${g.count}</td><td class="mono">${money(g.low)}</td><td class="mono">${money(g.median)}</td><td class="mono"><b>${money(g.high)}</b></td>${g.last!==undefined?`<td class="mono small">${esc(g.last||'—')}</td>`:''}</tr>`).join('')}</tbody></table></div>`;
+}
 function researchPanel(){
-  const R=S.research, v=R.vehicle, pv=R.preview;
+  const R=S.research, v=R.vehicle, pv=R.preview, ms=R.saved;
+  const src=SOURCES.find(x=>x[0]===R.src)||SOURCES[0];
   return `<button class="linkbtn" data-act="closeresearch">← ${R.from==='car'?'Back to car':'Research queue'}</button>
-  <div class="stack"><h1>${esc(vName(v))}</h1><p class="muted">Sold research, used OEM only.</p></div>
+  <div class="stack"><h1>${esc(vName(v))}</h1><p class="muted">Sold research, used OEM only. Every sale you paste is kept, small and large parts, and each paste adds to what's saved.</p></div>
   <div class="panel"><div class="panel-b stack">
    <div class="label">1 · Open the sold listings for this model</div>
    <div class="row"><a class="btn" href="${esc(soldUrl(v))}" target="_blank" rel="noopener">eBay sold ↗</a><a class="btn ghost" href="${esc(tpUrl(v))}" target="_blank" rel="noopener">Terapeak ↗</a></div>
-   <p class="small muted">Works best on a computer. Scroll to the bottom of the eBay page so all 240 results load, then press Ctrl+A and Ctrl+C (⌘A, ⌘C on a Mac). Terapeak's sold table copies the same way.</p>
-   <div class="label">2 · Paste the whole page here</div><p class="small muted">More than one page? Paste them all into this box, one after another, then read and save once. The same sale pasted twice only counts once. Saving again later replaces this model's numbers, so include every page each time.</p>
+   <p class="small muted">Works best on a computer. On eBay, scroll to the bottom so all 240 results load, then press Ctrl+A and Ctrl+C (⌘A, ⌘C on a Mac). Terapeak's sold table copies the same way.</p>
+   <div class="label">2 · Paste the whole page here</div>
+   <p class="small muted">More than one page? Paste them all into this box, one after another. The same sale is only ever saved once, even across different days.</p>
+   <label class="field"><span class="label">Where it came from</span><select class="inp" id="psrc">${SOURCES.map(x=>`<option value="${x[0]}" ${x[0]===src[0]?'selected':''}>${x[1]}</option>`).join('')}</select></label>
    <textarea class="inp" id="pastebox" rows="6" placeholder="Paste here" style="min-height:140px;resize:vertical">${esc(R.text||'')}</textarea>
    <div class="row"><button class="btn" data-act="preview" ${S.busy.preview||!R.text?'disabled':''}>${S.busy.preview?'<span class="spinner"></span> Reading…':'Read sales'}</button>${R.text?`<button class="linkbtn small" data-act="clearpaste">Clear</button>`:''}</div>
   </div></div>
-  ${pv?`<div class="panel"><div class="panel-h"><h2>Found ${pv.groups.reduce((a,g)=>a+g.count,0)} sales in ${pv.groups.length} part types</h2><span class="small muted">Read ${pv.read} listings · left out ${pv.excluded.junk} junk/aftermarket/new, ${pv.excluded.big} too big, ${pv.excluded.other_vehicle} other vehicles</span></div>
-   ${pv.groups.length?`<div style="overflow-x:auto"><table class="pt"><thead><tr><th>Part</th><th>Sold</th><th>Rough</th><th>Typical</th><th>Clean</th></tr></thead><tbody>${pv.groups.map(g=>`<tr><td>${esc(g.name)}${g.key.startsWith('d:')?' <span class="chip steady" style="font-size:.7rem">new</span>':''}</td><td class="mono">${g.count}</td><td class="mono">${money(g.low)}</td><td class="mono">${money(g.median)}</td><td class="mono"><b>${money(g.high)}</b></td></tr>`).join('')}</tbody></table></div>
-   <div class="panel-b stack"><div class="label">3 · Save for these years</div><p class="small muted">Most parts fit a range of years. Save once for the whole generation.</p>
+  ${pv?`<div class="panel"><div class="panel-h"><h2>Found ${pv.sales} sales</h2><span class="small muted">Read ${pv.read} listings · left out ${pv.excluded.junk} junk/aftermarket/new, ${pv.excluded.other_vehicle} other vehicles${pv.excluded.airbag_or_unknown?`, ${pv.excluded.airbag_or_unknown} airbags/unclear`:''}</span></div>
+   <div class="panel-b"><h3>Small parts · used for pull sheets</h3></div>${salesTable(pv.small,false)}
+   <div class="panel-b"><h3>Large parts · saved for later</h3></div>${salesTable(pv.big,true)}
+   ${pv.sales?`<div class="panel-b stack"><div class="label">3 · Save for these years</div><p class="small muted">Most parts fit a range of years. Save once for the whole generation.</p>
     <div class="row"><input class="inp" style="width:100px" id="yfrom" inputmode="numeric" value="${esc(R.yFrom)}"><span>to</span><input class="inp" style="width:100px" id="yto" inputmode="numeric" value="${esc(R.yTo)}"><button class="btn good" data-act="savepaste" ${S.busy.save?'disabled':''}>${S.busy.save?'<span class="spinner"></span> Saving…':'Save research'}</button></div></div>`
-   :`<p class="panel-b muted">Nothing usable found. Check that you copied the sold results page for this model.</p>`}</div>`:''}`;
+   :`<p class="panel-b muted">Nothing usable found. Check that you copied the sold results page for this model.</p>`}</div>`:''}
+  <div class="panel"><div class="panel-h"><h2>Saved for ${esc(v.make)} ${esc(v.model)}</h2>${ms?`<span class="small muted">${Math.round(ms.total_sales).toLocaleString()} sales${ms.years?` · ${ms.years[0]}–${ms.years[1]}`:''}</span>`:''}</div>
+   ${ms?`<div class="panel-b"><h3>Small parts</h3></div>${salesTable(ms.small,false)}<div class="panel-b"><h3>Large parts</h3></div>${salesTable(ms.big,true)}`
+     :`<div class="panel-b"><button class="btn sm quiet" data-act="loadsaved" ${S.busy.saved?'disabled':''}>${S.busy.saved?'<span class="spinner"></span> Loading…':'Show every saved sale for this model'}</button></div>`}</div>`;
 }
-
 /* ---- Shelf ---- */
 function vShelf(){
   const f=S.shelfFilter; const items=S.items.filter(i=>f==='all'||i.status===f);
@@ -429,9 +440,14 @@ async function addToShelf(key,form){
   S.items.unshift(data); S.open[key]=false; toast(`${p.name} → bin ${row.shelf}`); draw();
 }
 function startResearch(vehicle,from){
-  S.research={vehicle:{year:vehicle.year,make:vehicle.make,model:vehicle.model},text:'',preview:null,from,yFrom:vehicle.year,yTo:vehicle.year};
+  S.research={vehicle:{year:vehicle.year,make:vehicle.make,model:vehicle.model},text:'',preview:null,saved:null,src:'ebay',from,yFrom:vehicle.year,yTo:vehicle.year};
   if(from!=='car') S.tab='research';
   draw(); window.scrollTo({top:0});
+}
+async function loadSaved(){
+  const R=S.research; S.busy.saved=true; draw();
+  try{ R.saved=await fn({action:'model_sales',vehicle:R.vehicle}); }catch(e){ toast(e.message); }
+  S.busy.saved=false; draw();
 }
 async function preview(){
   const R=S.research; S.busy.preview=true; draw();
@@ -443,8 +459,9 @@ async function savePaste(){
   if(!(yf>1980&&yt>1980&&Math.abs(yt-yf)<=14)){ toast('Enter a year range of 15 years or less'); return; }
   S.busy.save=true; draw();
   try{
-    const r=await fn({action:'research_save',text:R.text,vehicle:R.vehicle,year_from:yf,year_to:yt});
-    toast(`Saved for ${r.saved_years.length} model year${r.saved_years.length>1?'s':''}`);
+    const src=SOURCES.find(x=>x[0]===R.src)||SOURCES[0];
+    const r=await fn({action:'research_save',text:R.text,vehicle:R.vehicle,year_from:yf,year_to:yt,period_days:src[2]});
+    toast(src[2]?`Saved Terapeak totals for ${r.saved} listing${r.saved===1?'':'s'} (${yf===yt?yf:yf+'–'+yt})`:`Saved ${r.saved} new sale${r.saved===1?'':'s'}${r.already_saved?` (${r.already_saved} were already saved)`:''} for ${yf===yt?yf:yf+'–'+yt}`);
     const back=R.from; S.research=null; await Promise.all([loadCars(),loadPlatforms()]);
     if(back==='car'&&S.carData){ await openCar(S.carData.vehicle.id); }
   }catch(e){ toast(e.message); }
@@ -544,6 +561,7 @@ document.addEventListener('click',e=>{
   else if(a==='closeresearch'){ const back=S.research?.from; S.research=null; draw(); if(back==='car') window.scrollTo({top:0}); }
   else if(a==='clearpaste'){ S.research.text=''; S.research.preview=null; draw(); }
   else if(a==='preview') preview();
+  else if(a==='loadsaved') loadSaved();
   else if(a==='savepaste') savePaste();
   else if(a==='filter'){ S.shelfFilter=t.dataset.f; draw(); }
   else if(a==='runnow'){ S.gather.running=false; fn({action:'process'}).then(r=>{ S.gather.info=r; toast(`Gathered ${r.models_done} model${r.models_done===1?'':'s'} · ${r.cars_waiting} cars still waiting`); return Promise.all([loadCars(),fn({action:'status'}).then(s=>S.status=s)]); }).catch(e=>toast(e.message)).finally(draw); }
@@ -554,6 +572,7 @@ document.addEventListener('input',e=>{
   if(t.id==='pastebox'&&S.research){ const had=!!S.research.text; S.research.text=t.value; S.research.preview=null; if(had!==!!t.value) draw(); }
   if(t.id==='yfrom'&&S.research) S.research.yFrom=t.value;
   if(t.id==='yto'&&S.research) S.research.yTo=t.value;
+  if(t.id==='psrc'&&S.research) S.research.src=t.value;
 });
 document.addEventListener('submit',async e=>{
   e.preventDefault(); const f=e.target;
