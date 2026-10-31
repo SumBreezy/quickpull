@@ -296,7 +296,7 @@ function researchPanel(){
    <div class="label">1 · Open the sold listings for this model</div>
    <div class="row"><a class="btn" href="${esc(soldUrl(v))}" target="_blank" rel="noopener">eBay sold ↗</a><a class="btn ghost" href="${esc(tpUrl(v))}" target="_blank" rel="noopener">Terapeak ↗</a></div>
    <p class="small muted">Works best on a computer. Scroll to the bottom of the eBay page so all 240 results load, then press Ctrl+A and Ctrl+C (⌘A, ⌘C on a Mac). Terapeak's sold table copies the same way.</p>
-   <div class="label">2 · Paste the whole page here</div>
+   <div class="label">2 · Paste the whole page here</div><p class="small muted">More than one page? Paste them all into this box, one after another, then read and save once. The same sale pasted twice only counts once. Saving again later replaces this model's numbers, so include every page each time.</p>
    <textarea class="inp" id="pastebox" rows="6" placeholder="Paste here" style="min-height:140px;resize:vertical">${esc(R.text||'')}</textarea>
    <div class="row"><button class="btn" data-act="preview" ${S.busy.preview||!R.text?'disabled':''}>${S.busy.preview?'<span class="spinner"></span> Reading…':'Read sales'}</button>${R.text?`<button class="linkbtn small" data-act="clearpaste">Clear</button>`:''}</div>
   </div></div>

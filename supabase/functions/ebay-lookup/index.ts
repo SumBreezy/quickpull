@@ -248,10 +248,16 @@ const SOLD_DATE = /^sold\s+(?:on\s+)?([a-z]{3,9}\.? \d{1,2},? \d{4})/i;
 export function parsePaste(text: string): Listing[] {
   const lines = String(text || "").replace(/\r/g, "").split("\n").map((s) => s.trim()).filter(Boolean);
   const out: Listing[] = [];
+  const seen = new Set<string>(); // the same sale pasted twice (overlapping pages) only counts once
   let cur: { title: string; price?: number; ship?: number | null } | null = null;
-  const push = () => { if (cur && cur.price) out.push({ title: cur.title, price: cur.price, qty: 1, ship: cur.ship ?? null }); cur = null; };
+  let date = "", skipping = false;
+  const keep = (l: Listing, d: string) => { const k = `${l.title.toLowerCase()}|${l.price}|${d}`; if (seen.has(k)) return; seen.add(k); out.push(l); };
+  const push = () => { if (cur && cur.price) keep({ title: cur.title, price: cur.price, qty: 1, ship: cur.ship ?? null }, date); cur = null; };
   for (const raw of lines) {
-    if (/^results matching fewer words/i.test(raw)) break; // eBay's loose matches: not this vehicle
+    // eBay's loose matches are other vehicles: skip them until the next pasted page starts
+    if (/^results matching fewer words/i.test(raw)) { push(); skipping = true; continue; }
+    if (/^[\d,]+\+? results? for\b/i.test(raw) || /^shop on ebay$/i.test(raw)) { push(); skipping = false; continue; }
+    if (skipping) continue;
     // Terapeak and other tables copy as tab-separated rows
     const cells = raw.split("\t").map((c) => c.trim()).filter(Boolean);
     if (cells.length >= 3 && cells.some((c) => MONEY.test(c))) {
@@ -259,10 +265,11 @@ export function parsePaste(text: string): Listing[] {
       const pi = cells.findIndex((c) => MONEY.test(c));
       const price = Number(cells[pi].match(MONEY)![1].replace(/,/g, ""));
       const qtyCell = cells.slice(pi + 1).find((c) => /^\d{1,5}$/.test(c.replace(/,/g, "")));
-      if (title.length >= 15 && price > 0) { push(); out.push({ title, price, qty: qtyCell ? Number(qtyCell.replace(/,/g, "")) : 1 }); }
+      const lastDate = cells.find((c) => /[a-z]{3} \d{1,2}, \d{4}/i.test(c)) || "";
+      if (title.length >= 15 && price > 0) { push(); keep({ title, price, qty: qtyCell ? Number(qtyCell.replace(/,/g, "")) : 1 }, lastDate); }
       continue;
     }
-    if (SOLD_DATE.test(raw)) { push(); continue; }
+    if (SOLD_DATE.test(raw)) { push(); date = raw.match(SOLD_DATE)![1]; continue; }
     const pm = raw.match(PRICE);
     if (pm) {
       if (cur && cur.price == null) cur.price = Number(pm[1].replace(/,/g, ""));
