@@ -210,6 +210,22 @@ create table if not exists pm_templates (
 );
 alter table pm_templates enable row level security;
 
+-- One-time drop codes: let a research page send its text straight to the server for one model (10 minutes, used once).
+-- No policies on purpose: only the server function reads it.
+create table if not exists pm_drops (
+  code        text primary key,
+  platform    text not null,
+  vehicle     jsonb not null,
+  year_from   int,
+  year_to     int,
+  sisters     jsonb,
+  made_by     uuid,
+  expires_at  timestamptz not null,
+  used_at     timestamptz,
+  result      jsonb
+);
+alter table pm_drops enable row level security;
+
 -- eBay seller connection. No policies on purpose: only the server function can read it (it holds sign-in tokens).
 create table if not exists pm_ebay (
   id                    int primary key default 1 check (id = 1),

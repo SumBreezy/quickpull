@@ -1607,6 +1607,43 @@ async function syncOrders() {
   return { sold: n };
 }
 
+// ---------- Research drop codes (Claude in Chrome research) ----------
+async function makeDrop(b: any, who: any) {
+  const platform = String(b.platform || "");
+  const car = (await rest("GET", `pm_vehicles?platform=eq.${enc(platform)}&select=year,make,model&limit=1`))?.[0];
+  if (!car) return { error: "Unknown model." };
+  const v = { year: car.year, make: car.make, model: car.model };
+  let yf = Number(car.year), yt = Number(car.year), sisters: any[] = [];
+  try { const g = (await generationFor(v)).generation; if (g) { yf = g.year_from; yt = g.year_to; sisters = g.sisters || []; } } catch { /* this year only */ }
+  const code = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+  await rest("POST", "pm_drops", { code, platform, vehicle: v, year_from: yf, year_to: yt, sisters, made_by: who.id || null, expires_at: new Date(Date.now() + 10 * 60_000).toISOString() }, "return=minimal");
+  return { code, years: `${yf}-${yt}` };
+}
+async function useDrop(b: any) {
+  const code = String(b.code || "");
+  if (!/^[a-f0-9]{40}$/.test(code)) return { error: "Bad code." };
+  const d = (await rest("GET", `pm_drops?code=eq.${code}&select=*`))?.[0];
+  if (!d) return { error: "Unknown code." };
+  if (d.used_at) return { error: "This code was already used.", result: d.result };
+  if (new Date(d.expires_at).getTime() < Date.now()) return { error: "This code expired. Get a new one." };
+  const text = String(b.text || "").slice(0, 400_000);
+  if (text.length < 200) return { error: "Page text is empty or too short. Nothing saved." };
+  // claim it before saving so it can't be used twice
+  const claimed = await rest("PATCH", `pm_drops?code=eq.${code}&used_at=is.null`, { used_at: nowIso() }, "return=representation");
+  if (!claimed?.length) return { error: "This code was already used." };
+  const v = d.vehicle;
+  const pv = await researchPreview(text, v);
+  let result: any;
+  if (!pv.sales) result = { saved: 0, read: pv.read, note: "No usable used-OEM sales found on that page. Nothing saved." };
+  else {
+    const r: any = await researchSave(text, v, d.year_from, d.year_to, null, { id: d.made_by, role: "owner" }, d.sisters || []);
+    result = { model: `${v.year} ${v.make} ${v.model}`, years: `${d.year_from}-${d.year_to}`, found: pv.sales, saved: r.saved, already_saved: r.already_saved || 0,
+      top: pv.small.slice(0, 5).map((x: any) => `${x.name}: ${x.count} sold, clean $${Math.round(x.high)}`) };
+  }
+  await rest("PATCH", `pm_drops?code=eq.${code}`, { result }, "return=minimal");
+  return result;
+}
+
 async function recomputeAll() {
   const { part_min } = await settings();
   const plats = (await rest("GET", "pm_vehicles?status=eq.ready&select=platform")) || [];
@@ -1625,6 +1662,8 @@ export async function handle(req: Request): Promise<Response> {
   if (req.method !== "POST") return json({ error: "Use POST." }, 405);
   const body = await req.json().catch(() => ({}));
   try {
+    // A research page sending its text with a one-time drop code (no sign-in needed: the code is the permission)
+    if (body.action === "research_drop") return json(await useDrop(body));
     const who = await caller(req);
     if (!who) return json({ error: "Sign in first." }, 401);
     const owner = who.role === "owner";
@@ -1654,6 +1693,7 @@ export async function handle(req: Request): Promise<Response> {
       case "ebay_setup": return owner ? json(await ebaySellerSetup(body)) : ownerOnly();
       case "listing_draft": return owner ? json(await listingDraft(Number(body.id))) : ownerOnly();
       case "publish": return owner ? json(await publishItem(body)) : ownerOnly();
+      case "research_drop_code": return owner ? json(await makeDrop(body, who)) : ownerOnly();
       case "sync_orders": return owner ? json(await syncOrders()) : ownerOnly();
       case "template": {
         if (!owner) return ownerOnly();
