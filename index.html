@@ -824,7 +824,7 @@ function researchQueue(days=30){
 window.QP={
   ready:()=>!!S.user&&isOwner(),
   // One-time code so a research page can send its text straight to the server for this one model (10 minutes, used once)
-  async dropCode(platform){ if(!this.ready()) return {error:'Sign in to QuickPull as the owner first.'}; return await fn({action:'research_drop_code',platform}); },
+  async dropCode(platform,code){ if(!this.ready()) return {error:'Sign in to QuickPull as the owner first.'}; return await fn({action:'research_drop_code',platform,code}); },
   dropUrl:()=>CFG.supabaseUrl+'/functions/v1/ebay-lookup', dropKey:()=>CFG.supabaseKey,
   async refresh(){ await loadPlatforms(); draw(); return researchQueue().length; },
   queue(n=10,days=30){ return researchQueue(days).slice(0,n).map(g=>({platform:g.platform,name:vName(g),cars:g.cars,last_researched:g.researched_at,sold_url:soldUrl(g)})); },

@@ -1615,9 +1615,13 @@ async function makeDrop(b: any, who: any) {
   const v = { year: car.year, make: car.make, model: car.model };
   let yf = Number(car.year), yt = Number(car.year), sisters: any[] = [];
   try { const g = (await generationFor(v)).generation; if (g) { yf = g.year_from; yt = g.year_to; sisters = g.sisters || []; } } catch { /* this year only */ }
-  const code = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+  // The caller may bring its own random code (so the code never has to be read back); otherwise make one
+  const own = String(b.code || "");
+  if (own && !/^[a-f0-9]{40}$/.test(own)) return { error: "A code must be 40 random hex characters." };
+  if (own && (await rest("GET", `pm_drops?code=eq.${own}&select=code`))?.length) return { error: "That code was used before. Make a new one." };
+  const code = own || crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
   await rest("POST", "pm_drops", { code, platform, vehicle: v, year_from: yf, year_to: yt, sisters, made_by: who.id || null, expires_at: new Date(Date.now() + 10 * 60_000).toISOString() }, "return=minimal");
-  return { code, years: `${yf}-${yt}` };
+  return { code: own ? "registered" : code, years: `${yf}-${yt}` };
 }
 async function useDrop(b: any) {
   const code = String(b.code || "");
