@@ -199,6 +199,17 @@ alter table pm_items add column if not exists ebay_listing_id text;
 alter table pm_items add column if not exists listing_error   text;
 alter table pm_items add column if not exists channel         text default 'ebay';
 
+-- Listing templates learned from sold titles and top live listings, per make|model and part
+create table if not exists pm_templates (
+  model_key  text not null,
+  part_key   text not null,
+  data       jsonb not null,      -- title pattern, keywords, common specifics, description points, photo tips
+  sources    jsonb,               -- how many sold titles / which live listings it learned from
+  made_at    timestamptz not null default now(),
+  primary key (model_key, part_key)
+);
+alter table pm_templates enable row level security;
+
 -- eBay seller connection. No policies on purpose: only the server function can read it (it holds sign-in tokens).
 create table if not exists pm_ebay (
   id                    int primary key default 1 check (id = 1),
@@ -336,6 +347,8 @@ create policy "owner" on pm_vehicles   for all to authenticated using (pm_is_own
 create policy "owner" on pm_platforms  for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_part_stats for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_items      for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
+drop policy if exists "owner" on pm_templates;
+create policy "owner" on pm_templates for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_sales      for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_merges     for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_interchange for all to authenticated using (pm_is_owner()) with check (pm_is_owner());

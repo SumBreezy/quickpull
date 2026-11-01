@@ -76,6 +76,16 @@ How a listing works: **Shelf → Photos & list on eBay** → add photos (label c
 - When it sells on eBay, the app marks it Sold with the real price (checked every 15 minutes).
 - If eBay rejects a listing, its exact message shows on the part. Fix that field and publish again.
 
+## Claude in Chrome research (optional)
+Claude in Chrome can work through **Research → Let Claude in Chrome do it**. It opens each model's public eBay sold page, reads it, and saves it the same way a paste would, covering the whole generation.
+- Use a Chrome profile that is **not** signed in to eBay, with QuickPull open and signed in.
+- Save the **quickpull-chrome-research** skill once, then ask Claude: "research my QuickPull queue in Chrome".
+- Each run does at most 10 models and waits about 30 seconds between pages. It stops on its own at any captcha, sign-in page or block page.
+
+## Listing templates
+When you tap **Write listing**, QuickPull learns from what sells for that part. It reads your saved sold titles plus the top 3 live eBay listings, and Claude works out the title order, common item specifics, and what the best listings photograph. That is cached per model and part for 30 days.
+- Words that make a claim about the part ("Tested", "Working", "No cracks") are **never** added automatically. They show as **+ suggestions** you add only when they're true.
+
 ## If something doesn't work
 - **"eBay keys are missing or wrong"**: use the **Production** keys, not Sandbox.
 - **Settings shows the background timer as "Not running yet"**: re-check the project ref and secret in `cron.sql`, and that JWT verification is off.

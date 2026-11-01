@@ -1433,6 +1433,12 @@ async function listingDraft(itemId: number) {
   const name = listingName(it);
   let title = [yrs, v.make, v.model, name, "OEM", pn].filter(Boolean).join(" ").replace(/\s+/g, " ");
   if (title.length > 80) title = [yrs, v.make, v.model, name, pn].filter(Boolean).join(" ").slice(0, 80);
+  const tpl = v.make ? await listingTemplate(v, it.part_key, it.part_name).catch(() => null) : null;
+  if (tpl?.data?.title_pattern) {
+    const side = /_l$/.test(it.part_key) ? "Driver Left" : /_r$/.test(it.part_key) ? "Passenger Right" : "";
+    const t2 = titleFrom(tpl.data.title_pattern, { years: yrs, make: v.make, model: v.model, part: name.replace(/^(Driver Left|Passenger Right)\s+/, ""), side, part_number: pn, extra: "" }, ["OEM", ...(tpl.data.keywords || []).filter((k: string) => !CLAIM.test(k)).slice(0, 3)]);
+    if (t2 && t2.length >= 20 && (!pn || t2.includes(pn))) title = t2;
+  }
   const cat = await suggestCategory(`${v.make} ${v.model} ${name}`, v).catch(() => null);
   const aspectsWanted = cat ? await requiredAspects(cat.id, cat.tree) : [];
   const aspects: Record<string, string[]> = { Brand: [String(v.make || "OEM")], "Manufacturer Part Number": [pn || "Does Not Apply"] };
@@ -1450,6 +1456,7 @@ Reply with JSON only: {"Name":"Value",...}`, 600)) || {};
       for (const m of missing) if (j[m.name]) aspects[m.name] = [String(j[m.name])];
     } catch { /* fill by hand */ }
   }
+  for (const [k, val] of Object.entries(tpl?.data?.aspects || {})) if (!aspects[k]?.length) aspects[k] = [String(val)];
   for (const k of Object.keys(aspects)) if (!aspects[k].length) delete aspects[k];
   const size = PART[it.part_key]?.[3] || "S";
   const grade = it.grade || "B";
@@ -1461,12 +1468,83 @@ ${pn ? `<p><b>Part number:</b> ${esc(pn)}. Please match this number to your orig
 <p><b>Fits:</b> ${esc(fitLine)}. Fitment is a guide: the part number is the best match.</p>
 <p><b>Condition:</b> ${esc(condition)}${it.ai_notes ? " " + esc(it.ai_notes) : ""}</p>
 <p>You will receive the exact item pictured. Stock # ${esc(it.sku || "")}.</p>`;
-  const draft = { title, price: it.list_price, category_id: cat?.id || "", category_name: cat?.name || "", aspects, aspect_hints: aspectsWanted, fit, generation: gen ? { year_from: gen.year_from, year_to: gen.year_to } : null, condition, description, size, package: PACKAGES[size] || PACKAGES.S };
+  const draft = { title, price: it.list_price, category_id: cat?.id || "", category_name: cat?.name || "", aspects, aspect_hints: aspectsWanted, fit, generation: gen ? { year_from: gen.year_from, year_to: gen.year_to } : null, condition,
+    template: tpl ? { photos: tpl.data.photos, notes: tpl.data.notes, description_points: tpl.data.description_points, claim_words: tpl.data.claim_words || [], sold_titles: tpl.sources?.sold_titles || 0, live: (tpl.sources?.live || []).length, made_at: tpl.made_at } : null, description, size, package: PACKAGES[size] || PACKAGES.S };
   await rest("PATCH", `pm_items?id=eq.${it.id}`, { draft }, "return=minimal");
   return { draft };
 }
 const escRe = /[&<>"]/g;
 function esc(x: string) { return String(x ?? "").replace(escRe, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" } as any)[c]); }
+
+// ---------- Listing templates: learn from what sells ----------
+// Words that claim something about this exact part. Never added on their own: only offered, for you to add if true.
+const CLAIM = /test|work|guarant|warrant|\bnew\b|low mile|mint|perfect|excellent|no (scratch|crack|damage)|lifetime|fast ship|free ship|return/i;
+const SKIP_ASPECTS = /part number|mpn|interchange|fitment|year|make|model|brand|vin|warranty|upc|ean|isbn|stock/i;
+async function topListings(v: any, words: string) {
+  const token = await ebayToken(BROWSE_SCOPE);
+  const h = { Authorization: `Bearer ${token}`, "X-EBAY-C-MARKETPLACE-ID": "EBAY_US", "Accept-Language": "en-US" };
+  const q = `${v.year} ${v.make} ${v.model} ${words}`.trim();
+  callCount++;
+  const r = await fetch(`https://api.ebay.com/buy/browse/v1/item_summary/search?` + new URLSearchParams({ q, category_ids: EBAY_CATEGORY, filter: "conditions:{USED}", limit: "20" }), { headers: h });
+  if (!r.ok) return [];
+  const rows = ((await r.json()).itemSummaries || []).filter((i: any) => !isJunk(String(i.title || ""))).slice(0, 3);
+  const out = [];
+  for (const i of rows) {
+    callCount++;
+    const g = await fetch(`https://api.ebay.com/buy/browse/v1/item/${enc(i.itemId)}`, { headers: h });
+    if (!g.ok) continue;
+    const d = await g.json();
+    out.push({
+      title: d.title, price: Number(d.price?.value) || null, photos: 1 + (d.additionalImages || []).length,
+      aspects: (d.localizedAspects || []).map((a: any) => `${a.name}: ${a.value}`).slice(0, 25),
+      description: String(d.description || d.shortDescription || "").replace(/<style[\s\S]*?<\/style>|<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim().slice(0, 1200),
+    });
+  }
+  return out;
+}
+async function listingTemplate(v: any, partKey: string, partName: string, force = false) {
+  const mk = modelKey(v);
+  const have = (await rest("GET", `pm_templates?model_key=eq.${enc(mk)}&part_key=eq.${enc(partKey)}&select=*`))?.[0];
+  if (have && !force && Date.now() - new Date(have.made_at).getTime() < 30 * 864e5) return have;
+  if (!env("ANTHROPIC_API_KEY")) return have || null;
+  // Sold titles for this part: same model first, then any model (titles for the same part read alike)
+  let sold = (await rest("GET", `pm_sales?model_key=eq.${enc(mk)}&part_key=eq.${enc(partKey)}&select=title,price,sold_on&order=sold_on.desc.nullslast&limit=60`)) || [];
+  if (sold.length < 8) sold = sold.concat((await rest("GET", `pm_sales?part_key=eq.${enc(partKey)}&model_key=neq.${enc(mk)}&select=title,price,sold_on&order=price.desc&limit=40`)) || []);
+  const live = await topListings(v, PART[partKey]?.[2] || partName).catch(() => []);
+  if (!sold.length && !live.length) return have || null;
+  const prompt = `You help a used OEM auto parts seller write eBay listings that sell. Part: ${partName}. Vehicle: ${v.year} ${v.make} ${v.model}.
+Sold listing titles (what actually sold):
+${sold.slice(0, 50).map((x: any) => `- ${x.title} ($${x.price})`).join("\n") || "(none yet)"}
+Top live listings right now:
+${live.map((l: any, n: number) => `#${n + 1} "${l.title}" $${l.price} · ${l.photos} photos
+  specifics: ${l.aspects.join(" | ")}
+  description: ${l.description.slice(0, 600)}`).join("\n") || "(none)"}
+Work out what the selling titles have in common and how the best listings are written. Reply with JSON only:
+{"title_pattern":"order of parts in the title using {years} {make} {model} {part} {side} {part_number} {extra}, e.g. {years} {make} {model} {side} {part} OEM {part_number}",
+ "keywords":["words buyers search that often appear in sold titles, like OEM, Genuine, Tested, Halogen, LED, Heated, Power Fold"],
+ "aspects":{"Specific name":"typical value that does not depend on the exact car, e.g. Type, Bulb Type, Housing Color, Features, Country/Region of Manufacture"},
+ "description_points":["short points the best listings include, e.g. tested, mounting tabs intact, what is included"],
+ "photos":{"count":8,"tips":["what the best listings photograph"]},
+ "notes":"one sentence on what makes these sell"}`;
+  const j = firstJson(await askClaude(prompt, 1200)) || {};
+  const kws = (j.keywords || []).map(String).slice(0, 12);
+  const aspects: Record<string, string> = {};
+  for (const [k, val] of Object.entries(j.aspects || {})) if (!SKIP_ASPECTS.test(k) && !CLAIM.test(String(val)) && String(val).trim()) aspects[k] = String(val).slice(0, 65);
+  const data = {
+    title_pattern: String(j.title_pattern || "").slice(0, 200), keywords: kws.filter((k: string) => !CLAIM.test(k)), claim_words: kws.filter((k: string) => CLAIM.test(k)), aspects,
+    description_points: (j.description_points || []).map(String).slice(0, 8), photos: j.photos || null, notes: String(j.notes || "").slice(0, 300),
+  };
+  const row = { model_key: mk, part_key: partKey, data, sources: { sold_titles: sold.length, live: live.map((l: any) => ({ title: l.title, price: l.price, photos: l.photos })) }, made_at: nowIso() };
+  await rest("POST", "pm_templates?on_conflict=model_key,part_key", row, "resolution=merge-duplicates,return=minimal");
+  return row;
+}
+// Fill a title pattern with this part's real details, keep it under 80 characters
+function titleFrom(pattern: string, f: Record<string, string>, keywords: string[]) {
+  let t = pattern.replace(/\{(\w+)\}/g, (_, k) => f[k] ?? "").replace(/\s+/g, " ").trim();
+  if (!/\{/.test(pattern)) return "";
+  for (const kw of keywords) { if (t.length + kw.length + 1 > 80) break; if (!new RegExp(`\\b${kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(t)) t += " " + kw; }
+  return t.length > 80 ? t.slice(0, 80).replace(/\s+\S*$/, "") : t;
+}
 
 // ---------- Publish to eBay ----------
 async function publishItem(b: any) {
@@ -1577,6 +1655,12 @@ export async function handle(req: Request): Promise<Response> {
       case "listing_draft": return owner ? json(await listingDraft(Number(body.id))) : ownerOnly();
       case "publish": return owner ? json(await publishItem(body)) : ownerOnly();
       case "sync_orders": return owner ? json(await syncOrders()) : ownerOnly();
+      case "template": {
+        if (!owner) return ownerOnly();
+        const v = body.vehicle || {}; const key = String(body.part_key || "");
+        if (!v.make || !v.model || !key) return json({ error: "Need a vehicle and a part." });
+        return json({ template: await listingTemplate(v, key, String(body.part_name || PART[key]?.[1] || key), !!body.refresh) });
+      }
       case "part_number": return owner ? json(await partNumberInfo(String(body.part_number || ""))) : ownerOnly();
       case "model_sales": return owner ? json(await modelSales(body.vehicle || {})) : ownerOnly();
       case "recompute": return owner ? json(await recomputeAll()) : ownerOnly();

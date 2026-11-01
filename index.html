@@ -342,7 +342,13 @@ function vResearch(){
   for(const c of S.cars){ if(!c.platform||new Date(c.scanned_at)<since) continue; const g=by.get(c.platform)||{platform:c.platform,year:c.year,make:c.make,model:c.model,cars:0,value:0}; g.cars++; g.value=Math.max(g.value,Number(c.est_value||0)); by.set(c.platform,g); }
   const plats=[...by.values()].map(g=>({...g,info:S.platforms?.[g.platform]})).sort((a,b)=>(!!a.info?.researched_at - !!b.info?.researched_at) || (b.cars-a.cars) || (b.value-a.value));
   const done=plats.filter(p=>p.info?.researched_at).length;
+  const log=S.chromeLog||[];
   return `<div class="stack"><h1>Research queue</h1><p class="muted">Models you bought in the last 60 days, most common first. Open eBay's sold listings, copy the page, paste it here. One paste covers every part on that model.</p></div>
+  <details class="panel"><summary class="panel-h" style="cursor:pointer"><h3>Let Claude in Chrome do it</h3><span class="small muted">${researchQueue().length} model${researchQueue().length===1?'':'s'} waiting</span></summary><div class="panel-b stack small">
+   <p>Claude in Chrome can work through this queue: it opens each model's public eBay sold page, reads it, and saves it here the same way a paste would. It covers each model's whole generation.</p>
+   <ol style="margin:0;padding-left:18px"><li>Use a Chrome profile that is <b>not</b> signed in to eBay, with this page open and signed in.</li><li>In Claude, run the <b>quickpull-chrome-research</b> skill (or say "research my QuickPull queue in Chrome").</li><li>It stops on its own if eBay shows a captcha, a sign-in page or a block page, and does at most 10 models per run.</li></ol>
+   ${log.length?`<div class="list">${log.slice(0,8).map(l=>`<div class="item"><span>${esc(l.name)}</span><span class="muted">${l.saved} saved · ${ago(l.at)}</span></div>`).join('')}</div>`:''}
+  </div></details>
   <div class="kpis"><div class="kpi"><span class="label">Models</span><b>${plats.length}</b></div><div class="kpi"><span class="label">Researched</span><b>${done}</b></div><div class="kpi"><span class="label">To do</span><b>${plats.length-done}</b></div></div>
   ${plats.length?`<div class="panel list">${plats.map(p=>`<div class="item"><div><b>${esc(vName(p))}</b><div class="small muted">${p.cars} car${p.cars>1?'s':''} bought · ${p.info?.researched_at?'researched '+ago(p.info.researched_at):'not researched'}</div></div><button class="btn sm ${p.info?.researched_at?'quiet':''}" data-act="research" data-p="${esc(p.platform)}">Research</button></div>`).join('')}</div>`:`<div class="panel empty"><p class="muted">Check in some cars first.</p></div>`}`;
 }
@@ -428,6 +434,9 @@ function vSell(){
 
   <div class="panel"><div class="panel-h"><h2>Listing</h2></div><div class="panel-b stack">
    <div><button class="btn sm ${D?'quiet':''}" data-act="draft" ${S.busy.draft?'disabled':''}>${S.busy.draft?'<span class="spinner"></span> Writing listing…':D?'Rebuild listing':'Write listing'}</button></div>
+   ${D?.template?`<div class="ai small stack" style="gap:6px"><div><b>Learned from ${D.template.sold_titles} sold title${D.template.sold_titles===1?'':'s'} and ${D.template.live} top live listing${D.template.live===1?'':'s'}.</b>${D.template.notes?' '+esc(D.template.notes):''}</div>
+    ${D.template.photos?.tips?.length?`<div>Photos: about ${esc(D.template.photos.count||8)} · ${D.template.photos.tips.map(esc).join(' · ')}</div>`:''}
+    ${(D.template.description_points||[]).length||(D.template.claim_words||[]).length?`<div>Top listings also say this. <b>Add only what's true for this part:</b></div><div class="chips">${[...(D.template.description_points||[]).map(x=>['point',x]),...(D.template.claim_words||[]).map(x=>['word',x])].map(([k,x])=>`<button class="chip-f" data-act="addpoint" data-k="${k}" data-x="${esc(x)}">+ ${esc(x)}</button>`).join('')}</div>`:''}</div>`:''}
    ${D?`<label class="field"><span class="label">Title · <span id="tlen">${(D.title||'').length}</span>/80</span><input class="inp" data-sf="title" maxlength="80" value="${esc(D.title)}"></label>
    <div class="row"><label class="field" style="width:130px"><span class="label">Price $</span><input class="inp" data-sf="price" inputmode="decimal" value="${esc(D.price??'')}"></label>
     <label class="field" style="flex:1;min-width:180px"><span class="label">eBay category${D.category_name?' · '+esc(D.category_name):''}</span><input class="inp mono" data-sf="category_id" inputmode="numeric" value="${esc(D.category_id||'')}" placeholder="category number"></label></div>
@@ -804,6 +813,33 @@ function attachCamera(){
 }
 function stopCamera(){ S.scanning=false; clearTimeout(camTimer); camTimer=null; if(camStream){ camStream.getTracks().forEach(t=>t.stop()); camStream=null; } draw(); }
 
+/* ===== Claude in Chrome research helpers =====
+   Claude in Chrome reads public eBay sold pages and hands the text to these. Nothing here touches eBay itself. */
+function researchQueue(days=30){
+  const since=Date.now()-60*864e5, old=Date.now()-days*864e5, by=new Map();
+  for(const c of S.cars){ if(!c.platform||new Date(c.scanned_at)<since) continue; const g=by.get(c.platform)||{platform:c.platform,year:c.year,make:c.make,model:c.model,cars:0}; g.cars++; by.set(c.platform,g); }
+  return [...by.values()].map(g=>({...g,researched_at:S.platforms?.[g.platform]?.researched_at||null}))
+    .filter(g=>!g.researched_at||new Date(g.researched_at)<old).sort((a,b)=>(!!a.researched_at-!!b.researched_at)||(b.cars-a.cars));
+}
+window.QP={
+  ready:()=>!!S.user&&isOwner(),
+  queue(n=10,days=30){ return researchQueue(days).slice(0,n).map(g=>({platform:g.platform,name:vName(g),cars:g.cars,last_researched:g.researched_at,sold_url:soldUrl(g)})); },
+  async research(platform,text){
+    if(!this.ready()) return {error:'Sign in to QuickPull as the owner first.'};
+    const c=S.cars.find(x=>x.platform===platform); if(!c) return {error:'Unknown model: '+platform};
+    if(!text||text.length<200) return {error:'Page text is empty or too short. Nothing saved.'};
+    const vehicle={year:c.year,make:c.make,model:c.model};
+    const pv=await fn({action:'research_preview',text,vehicle});
+    if(!pv.sales) return {saved:0,read:pv.read,note:'No usable used-OEM sales found on that page. Nothing saved.'};
+    let yf=+c.year, yt=+c.year, sisters=[];
+    try{ const g=(await fn({action:'generation',vehicle})).generation; if(g){ yf=g.year_from; yt=g.year_to; sisters=g.sisters||[]; } }catch{}
+    const r=await fn({action:'research_save',text,vehicle,year_from:yf,year_to:yt,sisters});
+    S.chromeLog=[{name:vName(c),saved:r.saved,at:new Date().toISOString()},...(S.chromeLog||[])].slice(0,50);
+    await loadPlatforms(); if(S.tab==='research'&&!S.research) draw();
+    return {model:vName(c),years:`${yf}-${yt}`,found:pv.sales,saved:r.saved,already_saved:r.already_saved||0,top:(pv.small||[]).slice(0,5).map(x=>`${x.name} ${x.count} sold, clean ${money(x.high)}`)};
+  }
+};
+
 /* ===== Events ===== */
 document.addEventListener('click',e=>{
   const t=e.target.closest('[data-act]'); if(!t) return; const a=t.dataset.act;
@@ -843,6 +879,10 @@ document.addEventListener('click',e=>{
   else if(a==='draft') makeDraft();
   else if(a==='usegen'){ const D=S.sell.draft, f=(draftOut().fit[0])||D.fit[0]; D.fitText=`${D.generation.year_from}-${D.generation.year_to} ${f.make} ${f.model}`; draw(); }
   else if(a==='publish') publish();
+  else if(a==='addpoint'){ const D=S.sell?.draft; if(!D) return; const x=t.dataset.x;
+    if(t.dataset.k==='word'){ const nt=`${D.title} ${x}`.trim(); if(nt.length>80){ toast('No room in the title (80 characters)'); return; } D.title=nt; }
+    else D.description=String(D.description||'').replace(/(<p>You will receive)/, `<p>${esc(x)}</p>\n$1`).replace(/^(?![\s\S]*<p>You will receive)([\s\S]*)$/, `$1\n<p>${esc(x)}</p>`);
+    toast('Added: '+x); draw(); }
   else if(a==='ebayconnect') ebayConnect();
   else if(a==='cleanup') cleanup();
   else if(a==='runnow'){ S.gather.running=false; fn({action:'process'}).then(r=>{ S.gather.info=r; toast(`Gathered ${r.models_done} model${r.models_done===1?'':'s'} · ${r.cars_waiting} cars still waiting`); return Promise.all([loadCars(),fn({action:'status'}).then(s=>S.status=s)]); }).catch(e=>toast(e.message)).finally(draw); }
