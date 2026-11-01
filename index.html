@@ -165,7 +165,7 @@ const vName = v => [v.year,v.make,v.model].filter(Boolean).join(' ') || 'Decodin
 const takeHome = (price,size) => price==null ? null : price*(1-FEE_RATE) - FEE_FIXED - (PACK[size]||4);
 const chicagoDay = d => new Date(d).toLocaleDateString('en-CA',{timeZone:'America/Chicago'});
 const today = () => chicagoDay(Date.now());
-const soldUrl = (v,words='') => 'https://www.ebay.com/sch/i.html?'+new URLSearchParams({_nkw:`${v.year} ${v.make} ${v.model} ${words}`.trim(),_sacat:'6030',LH_Sold:'1',LH_Complete:'1',LH_ItemCondition:'3000',_sop:'16',_ipg:'240'});
+const soldUrl = (v,words='') => 'https://www.ebay.com/sch/i.html?'+new URLSearchParams({_nkw:`${v.year} ${v.make} ${v.model} ${words}`.trim(),_sacat:'6030',LH_Sold:'1',LH_Complete:'1',LH_ItemCondition:'3000',_sop:'13',_ipg:'240'});
 const tpUrl = (v,words='') => 'https://www.ebay.com/sh/research?'+new URLSearchParams({marketplace:'EBAY-US',keywords:`${v.year} ${v.make} ${v.model} ${words}`.trim(),dayRange:'90',categoryId:'6030',tabName:'SOLD'});
 const DEST = {pull:['fast','Pull area'],shred:['unknown','Shred'],waiting:['steady','Waiting on data']};
 const CATS = [['modules','Computers & modules'],['electronics','Electronics'],['lights','Lights'],['mirrors','Mirrors'],['plastic','Plastic & trim'],['engine','Engine bay (small)'],['keys','Keys & security'],['other','Other'],['large','Large parts']];
