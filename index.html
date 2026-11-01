@@ -134,6 +134,10 @@ textarea.inp{line-height:1.5}
 .addph input{display:none}
 .steps{counter-reset:st}.steps>.panel{counter-increment:st}.steps>.panel>.panel-h h2::before{content:counter(st) ". ";color:var(--muted)}
 .ai{background:var(--sunk);border-radius:10px;padding:10px 12px}
+.clickrow{cursor:pointer}.clickrow:hover td{background:var(--sunk)}
+.sub{background:var(--sunk);padding:10px 12px;border-radius:8px;margin:4px 0 10px}
+.sub .pt td,.sub .pt th{background:transparent}
+.titles{font-size:.82rem;color:var(--muted);padding:2px 0 8px 14px;white-space:normal;max-width:min(600px,78vw)}
 </style>
 </head>
 <body>
@@ -216,7 +220,7 @@ const S = { user:null, role:null, tab:'checkin', err:'', busy:{}, status:null,
   vinText:'', lastAdd:null, day:'today', cars:[], gather:{running:false, info:null},
   car:null, carData:null, showHidden:false, open:{},
   research:null, // {vehicle, text, preview, from, to}
-  items:[], shelfFilter:'pulled', people:[], data:null, scanning:false, cats:[], dataQ:{days:30,make:'',model:'',sold_only:false,tab:'small'}, shelfQ:'', notCounted:false, large:null, sell:null, ebay:null };
+  items:[], shelfFilter:'pulled', people:[], data:null, scanning:false, cats:[], dataQ:{days:30,make:'',model:'',sold_only:false,tab:'small'}, shelfQ:'', notCounted:false, large:null, sell:null, ebay:null, carsQ:{make:'',model_key:'',year:'',size:'small',days:0}, cars2:null, carOpen:{}, fastOpen:{} };
 const isOwner = () => S.role==='owner';
 
 /* ===== Rendering ===== */
@@ -224,11 +228,11 @@ function draw(){
   const tabs=$('#tabs');
   if(!S.user){ tabs.hidden=true; $('#signout').hidden=true; $('#app').innerHTML = configured ? vLogin() : vSetup(); return; }
   tabs.hidden=false; $('#signout').hidden=false;
-  const list = isOwner() ? [['checkin','Check-in'],['research','Research'],['shelf','Shelf',S.items.filter(i=>i.status==='pulled'||i.status==='listed').length],['data','Data'],['settings','Settings']] : [['checkin','Check-in']];
+  const list = isOwner() ? [['checkin','Check-in'],['research','Research'],['cars','Cars'],['shelf','Shelf',S.items.filter(i=>i.status==='pulled'||i.status==='listed').length],['data','Data'],['settings','Settings']] : [['checkin','Check-in']];
   const cur = S.tab==='car' ? 'checkin' : S.tab;
   tabs.innerHTML=list.map(([k,l,c])=>`<button data-act="tab" data-t="${k}" ${cur===k?'aria-current="page"':''}>${l}${c?`<span class="count">${c}</span>`:''}</button>`).join('');
   const ae=document.activeElement, fid=ae?.id, sel=fid&&ae.selectionStart!=null?[ae.selectionStart,ae.selectionEnd]:null;
-  const views={checkin:vCheckin, car:vCar, research:vResearch, shelf:()=>S.sell?vSell():vShelf(), data:vData, settings:vSettings};
+  const views={checkin:vCheckin, car:vCar, research:vResearch, cars:vCars, shelf:()=>S.sell?vSell():vShelf(), data:vData, settings:vSettings};
   $('#app').innerHTML = (S.err?`<div class="banner bad">${esc(S.err)}</div>`:'') + setupBanner() + (views[S.tab]||vCheckin)();
   if(fid){ const el=document.getElementById(fid); if(el){ el.focus({preventScroll:true}); if(sel&&el.setSelectionRange) try{ el.setSelectionRange(...sel);}catch{} } }
   if(S.scanning) attachCamera();
@@ -403,6 +407,39 @@ function vShelf(){
    </form></div>`).join('')}</div>`:`<div class="panel empty"><p class="muted">Nothing here yet. Open a car and tap “Add to shelf” on a part.</p></div>`}`;
 }
 
+/* ---- Cars: every make / model / year with its researched parts and sales ---- */
+function vCars(){
+  const Q=S.carsQ, D=S.cars2;
+  const makes=D?.makes||[], models=(D?.models||[]).filter(m=>!Q.make||m.make===Q.make);
+  const cur=models.find(m=>m.model_key===Q.model_key);
+  const years=cur&&cur.year_from&&cur.year_to?Array.from({length:Math.min(40,cur.year_to-cur.year_from+1)},(_,i)=>cur.year_from+i):[];
+  const head=`<div class="stack"><h1>Cars</h1><p class="muted">Every make, model and year with saved sales. Pick a make, then a model, then a year to see what sells from that car and how fast.</p></div>
+  <div class="row">
+   <select class="inp" id="cq-make" style="width:auto"><option value="">All makes</option>${makes.map(m=>`<option ${Q.make===m?'selected':''}>${esc(m)}</option>`).join('')}</select>
+   <select class="inp" id="cq-model" style="width:auto" ${!Q.make&&!Q.model_key?'':''}><option value="">${Q.make?'All '+esc(Q.make)+' models':'All models'}</option>${models.map(m=>`<option value="${esc(m.model_key)}" ${Q.model_key===m.model_key?'selected':''}>${esc(Q.make?m.model:m.make+' '+m.model)} (${m.sales})</option>`).join('')}</select>
+   ${Q.model_key?`<select class="inp" id="cq-year" style="width:auto"><option value="">All years</option>${years.map(y=>`<option ${+Q.year===y?'selected':''}>${y}</option>`).join('')}</select>`:''}
+   <select class="inp" id="cq-days" style="width:auto">${[[0,'All saved sales'],[90,'Sold in last 90 days'],[180,'Last 6 months'],[365,'Last year']].map(([d,l])=>`<option value="${d}" ${+Q.days===d?'selected':''}>${l}</option>`).join('')}</select>
+  </div>
+  <div class="seg" role="group" aria-label="Part size"><button data-act="csize" data-s="small" aria-pressed="${Q.size==='small'}">Small parts</button><button data-act="csize" data-s="big" aria-pressed="${Q.size==='big'}">Large parts</button></div>`;
+  if(!D) return head+`<div class="panel empty"><span class="spinner"></span></div>`;
+  const fastNote=`<p class="small muted">"Fast parts" sell about once a month or more (3+ in 90 days) and are worth at least the ${money(D.cutoff)} cutoff clean. "Fast $" adds up their clean prices: roughly what the quick-moving parts on one car bring.</p>`;
+  if(D.level==='models'){
+    return head+fastNote+`<div class="panel"><div class="panel-h"><h2>${Q.make?esc(Q.make)+' models':'All models'}${Q.year?' · '+esc(Q.year):''}</h2><span class="small muted">${D.sales.toLocaleString()} sales · best first</span></div><div style="overflow-x:auto"><table class="pt"><thead><tr><th>Car</th><th>Sales</th><th>Sold 90d</th><th>Fast parts</th><th>Fast $</th><th>Top fast parts</th></tr></thead><tbody>
+    ${D.list.map(m=>`<tr class="clickrow" data-act="gocar" data-mk="${esc(m.model_key)}" data-make="${esc(m.make)}"><td><b>${esc(m.make)} ${esc(m.model)}</b> <span class="muted small">${m.years[0]===m.years[1]?m.years[0]:m.years.join('–')}</span></td><td class="mono">${m.sales}</td><td class="mono">${m.per90}</td><td class="mono">${m.fast_parts}/${m.part_types}</td><td class="mono"><b>${money(m.fast_value)}</b></td><td class="small">${m.top.map(t=>`${esc(t.name)} <span class="muted">${money(t.high)}</span>`).join(' · ')||'<span class="muted">—</span>'}</td></tr>`).join('')||'<tr><td colspan="6" class="muted">No saved sales in this filter.</td></tr>'}</tbody></table></div></div>`;
+  }
+  const rows=D.parts.filter(p=>Q.size==='big'||catOk(p.cat));
+  const name=cur?`${cur.make} ${cur.model}`:Q.model_key;
+  return head+(Q.size==='small'?chips():'')+`<div class="kpis"><div class="kpi"><span class="label">Sales saved</span><b>${D.sales.toLocaleString()}</b></div><div class="kpi"><span class="label">Part types</span><b>${D.parts.length}</b></div>${Q.size==='small'?`<div class="kpi"><span class="label">Fast $ per car</span><b>${money(D.fast_value)}</b></div>`:''}</div>
+  <div class="panel"><div class="panel-h"><h2>${esc(Q.year||'')} ${esc(name)}</h2><span class="small muted">${D.years?`sales cover ${D.years[0]}–${D.years[1]}`:''} · tap a part for recent sales</span></div><div style="overflow-x:auto"><table class="pt"><thead><tr><th>Part</th><th>Sales</th><th>Sold 90d</th><th>Sells every</th><th>Trend</th><th>Rough</th><th>Typical</th><th>Clean</th><th>Last sold</th></tr></thead><tbody>
+  ${rows.map(p=>`<tr class="clickrow" data-act="carpart" data-k="${esc(p.key)}"><td>${S.carOpen[p.key]?'▾':'▸'} ${esc(p.name)}${p.label==='fast'?' <span class="chip fast" style="font-size:.7rem">fast</span>':''}</td><td class="mono">${p.n}</td><td class="mono">${p.per90}</td><td class="mono">${p.every_days!=null?p.every_days+' d':'—'}</td><td>${p.trend==='up'?'↑':p.trend==='down'?'↓':'—'}</td><td class="mono">${money(p.low)}</td><td class="mono">${money(p.median)}</td><td class="mono"><b>${money(p.high)}</b></td><td class="mono small">${esc(p.last||'—')}</td></tr>
+   ${S.carOpen[p.key]?`<tr><td colspan="9" style="padding:0"><div class="sub">${spark(p.weeks||[])}${(p.titles||[]).map(t=>`<div class="titles">${esc(t.sold_on?String(t.sold_on).slice(0,10):'')} · <b>${money(t.price)}</b> · ${esc(t.title)}</div>`).join('')}</div></td></tr>`:''}`).join('')||'<tr><td colspan="9" class="muted">Nothing in this filter.</td></tr>'}</tbody></table></div></div>`;
+}
+async function loadCarSales(){
+  S.cars2=null; draw();
+  try{ S.cars2=await fn({action:'car_sales',...S.carsQ}); }catch(e){ toast(e.message); S.cars2={level:'models',makes:[],models:[],list:[],sales:0,cutoff:60}; }
+  draw();
+}
+
 /* ---- Sell one part: photos → AI read → listing → publish ---- */
 function vSell(){
   const X=S.sell, i=S.items.find(x=>x.id===X.id); if(!i){ S.sell=null; return vShelf(); }
@@ -477,7 +514,7 @@ function vData(){
     const F=S.fastest;
     if(!F){ body=`<div class="panel empty"><span class="spinner"></span></div>`; }
     else { const rows=F.parts.filter(p=>catOk(p.cat));
-      body=chips()+`<div class="panel"><div class="panel-h"><h2>Fastest sellers</h2><span class="small muted">From sold dates in your Research pastes · last 90 days · all models</span></div><div style="overflow-x:auto"><table class="pt"><thead><tr><th>Part</th><th>Sold 90d</th><th>Sells every</th><th>Trend</th><th>Typical</th><th>Clean</th><th>Models</th></tr></thead><tbody>${rows.map(p=>`<tr><td>${esc(p.name)}</td><td class="mono">${p.per90}</td><td class="mono">${p.every_days!=null?p.every_days+' d':'—'}</td><td>${p.trend==='up'?'↑ picking up':p.trend==='down'?'↓ slowing':'—'}</td><td class="mono">${money(p.median)}</td><td class="mono"><b>${money(p.high)}</b></td><td class="mono">${p.models}</td></tr>`).join('')||'<tr><td colspan="7" class="muted">No dated sales yet. Paste eBay sold pages in Research (Terapeak totals have no dates).</td></tr>'}</tbody></table></div></div>`; }
+      body=chips()+`<div class="panel"><div class="panel-h"><h2>Fastest sellers</h2><span class="small muted">From sold dates in your Research pastes · last 90 days · tap a part to see which cars</span></div><div style="overflow-x:auto"><table class="pt"><thead><tr><th>Part</th><th>Sold 90d</th><th>Sells every</th><th>Trend</th><th>Typical</th><th>Clean</th><th>Models</th></tr></thead><tbody>${rows.map(p=>`<tr class="clickrow" data-act="fastopen" data-k="${esc(p.key)}" aria-expanded="${!!S.fastOpen[p.key]}"><td>${S.fastOpen[p.key]?'▾':'▸'} ${esc(p.name)}</td><td class="mono">${p.per90}</td><td class="mono">${p.every_days!=null?p.every_days+' d':'—'}</td><td>${p.trend==='up'?'↑ picking up':p.trend==='down'?'↓ slowing':'—'}</td><td class="mono">${money(p.median)}</td><td class="mono"><b>${money(p.high)}</b></td><td class="mono">${p.models}</td></tr>${S.fastOpen[p.key]?`<tr><td colspan="7" style="padding:0"><div class="sub"><div class="label" style="margin-bottom:4px">Which cars it sells from · fastest first</div><table class="pt"><thead><tr><th>Car</th><th>Sold 90d</th><th>Sells every</th><th>Typical</th><th>Clean</th></tr></thead><tbody>${(p.by_model||[]).map(m=>`<tr class="clickrow" data-act="gocar" data-mk="${esc(m.model_key)}" data-make="${esc(m.make)}"><td>${esc(m.make)} ${esc(m.model)} <span class="muted small">${esc(m.years)}</span></td><td class="mono">${m.per90}</td><td class="mono">${m.every_days!=null?m.every_days+' d':'—'}</td><td class="mono">${money(m.median)}</td><td class="mono"><b>${money(m.high)}</b></td></tr>`).join('')}</tbody></table></div></td></tr>`:''}`).join('')||'<tr><td colspan="7" class="muted">No dated sales yet. Paste eBay sold pages in Research (Terapeak totals have no dates).</td></tr>'}</tbody></table></div></div>`; }
   } else if(Q.tab==='large'){
     body=`<div class="panel"><div class="panel-h"><h2>Large parts sold</h2><span class="small muted">From your Research pastes for these models · never added to car totals</span></div>${D.large.length?salesTable(D.large,true,true):'<p class="panel-b muted">No large-part sales saved yet. They come from Research pastes.</p>'}</div>`;
   } else {
@@ -847,7 +884,7 @@ window.QP={
 /* ===== Events ===== */
 document.addEventListener('click',e=>{
   const t=e.target.closest('[data-act]'); if(!t) return; const a=t.dataset.act;
-  if(a==='tab'){ if(S.scanning) stopCamera(); S.tab=t.dataset.t; S.research=null; S.err=''; draw(); window.scrollTo({top:0}); if(S.tab==='data') fn({action:'status'}).then(s=>{S.status=s;}).catch(()=>{}).finally(loadData); if(S.tab==='settings'){ fn({action:'status'}).then(s=>{S.status=s;draw();}).catch(()=>{}); loadEbay(); } if(S.tab!=='shelf') S.sell=null; }
+  if(a==='tab'){ if(S.scanning) stopCamera(); S.tab=t.dataset.t; S.research=null; S.err=''; draw(); window.scrollTo({top:0}); if(S.tab==='data') fn({action:'status'}).then(s=>{S.status=s;}).catch(()=>{}).finally(loadData); if(S.tab==='settings'){ fn({action:'status'}).then(s=>{S.status=s;draw();}).catch(()=>{}); loadEbay(); } if(S.tab!=='shelf') S.sell=null; if(S.tab==='cars') loadCarSales(); }
   else if(a==='add') addCars();
   else if(a==='camera'){ S.scanning?stopCamera():startCamera(); }
   else if(a==='day'){ S.day=t.dataset.d; draw(); }
@@ -883,6 +920,10 @@ document.addEventListener('click',e=>{
   else if(a==='draft') makeDraft();
   else if(a==='usegen'){ const D=S.sell.draft, f=(draftOut().fit[0])||D.fit[0]; D.fitText=`${D.generation.year_from}-${D.generation.year_to} ${f.make} ${f.model}`; draw(); }
   else if(a==='publish') publish();
+  else if(a==='fastopen'){ S.fastOpen[t.dataset.k]=!S.fastOpen[t.dataset.k]; draw(); }
+  else if(a==='carpart'){ S.carOpen[t.dataset.k]=!S.carOpen[t.dataset.k]; draw(); }
+  else if(a==='csize'){ S.carsQ.size=t.dataset.s; S.carOpen={}; loadCarSales(); }
+  else if(a==='gocar'){ S.tab='cars'; Object.assign(S.carsQ,{make:t.dataset.make||'',model_key:t.dataset.mk,year:'',size:'small'}); S.carOpen={}; window.scrollTo({top:0}); loadCarSales(); }
   else if(a==='addpoint'){ const D=S.sell?.draft; if(!D) return; const x=t.dataset.x;
     if(t.dataset.k==='word'){ const nt=`${D.title} ${x}`.trim(); if(nt.length>80){ toast('No room in the title (80 characters)'); return; } D.title=nt; }
     else D.description=String(D.description||'').replace(/(<p>You will receive)/, `<p>${esc(x)}</p>\n$1`).replace(/^(?![\s\S]*<p>You will receive)([\s\S]*)$/, `$1\n<p>${esc(x)}</p>`);
@@ -929,6 +970,10 @@ document.addEventListener('change',e=>{
   if(t.id==='dq-make'){ S.dataQ.make=t.value; loadData(); }
   if(t.id==='dq-sold'){ S.dataQ.sold_only=t.checked; loadData(); }
   if(t.id==='photoin'&&t.files?.length) uploadPhotos(t.files);
+  if(t.id==='cq-make'){ Object.assign(S.carsQ,{make:t.value,model_key:'',year:''}); S.carOpen={}; loadCarSales(); }
+  if(t.id==='cq-model'){ Object.assign(S.carsQ,{model_key:t.value,year:''}); S.carOpen={}; loadCarSales(); }
+  if(t.id==='cq-year'){ S.carsQ.year=t.value; loadCarSales(); }
+  if(t.id==='cq-days'){ S.carsQ.days=+t.value; loadCarSales(); }
 });
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&S.user) gatherLoop(); });
 $('#signout').onclick=async()=>{ await sb.auth.signOut(); Object.assign(S,{user:null,role:null,cars:[],items:[],carData:null,research:null,data:null,status:null}); draw(); };

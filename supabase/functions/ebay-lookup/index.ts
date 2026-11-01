@@ -381,7 +381,26 @@ function serviceHeaders() {
   if (!key) throw new Error("service_key_missing");
   return key.startsWith("sb_") ? { apikey: key } : { apikey: key, Authorization: `Bearer ${key}` };
 }
+// Supabase hands back at most 1,000 rows per request, so bigger reads are fetched in pages
+const PAGE = 1000;
+const HAS_ID = /^(pm_sales|pm_vehicles|pm_items|pm_interchange|pm_part_stats_x)\?/;
 async function rest(method: string, path: string, body?: unknown, prefer?: string): Promise<any> {
+  const lim = method === "GET" ? Number((path.match(/[?&]limit=(\d+)/) || [])[1] || 0) : 0;
+  if (lim > PAGE) {
+    let base = path.replace(/([?&])limit=\d+&?/, "$1").replace(/[?&]$/, "");
+    // a stable order so pages never skip or repeat rows (many sales share a date)
+    if (HAS_ID.test(base)) base = /[?&]order=/.test(base) ? base.replace(/([?&]order=[^&]*)/, (m) => (/\bid\./.test(m) ? m : m + ",id.asc")) : base + "&order=id.asc";
+    const out: any[] = [];
+    for (let off = 0; off < lim; off += PAGE) {
+      const rows = (await restOnce("GET", `${base}&limit=${Math.min(PAGE, lim - off)}&offset=${off}`)) || [];
+      out.push(...rows);
+      if (rows.length < Math.min(PAGE, lim - off)) break;
+    }
+    return out;
+  }
+  return restOnce(method, path, body, prefer);
+}
+async function restOnce(method: string, path: string, body?: unknown, prefer?: string): Promise<any> {
   const r = await fetch(`${env("SUPABASE_URL")}/rest/v1/${path}`, {
     method,
     headers: { ...serviceHeaders(), "Content-Type": "application/json", ...(prefer ? { Prefer: prefer } : {}) },
@@ -1205,7 +1224,7 @@ async function salesForPlatform(v: any, year: number, size = "small") {
 }
 async function fastestSellers(b: any) {
   const since = new Date(Date.now() - 90 * 864e5).toISOString().slice(0, 10);
-  const rows = (await rest("GET", `pm_sales?size=eq.small&source=eq.ebay-sold&sold_on=gte.${since}&select=part_key,part_name,price,qty,sold_on,model_key&limit=50000`)) || [];
+  const rows = (await rest("GET", `pm_sales?size=eq.small&source=eq.ebay-sold&sold_on=gte.${since}&select=part_key,part_name,price,qty,sold_on,model_key,make,model,year_from,year_to,fit_from,fit_to&limit=50000`)) || [];
   const g = new Map<string, any>();
   for (const r of rows) {
     const k = baseKey(r.part_key || "");
@@ -1213,13 +1232,74 @@ async function fastestSellers(b: any) {
     x.rows.push(r); x.prices.push(Number(r.price)); x.models.add(r.model_key); g.set(k, x);
   }
   const cfg = await settings();
-  return { parts: [...g.values()].filter((x) => !cfg.never_pull.includes(x.key)).map((x) => ({ key: x.key, name: x.name, cat: partCat(x.key, x.name), models: x.models.size, ...speedFrom(x.rows), ...(priceStats(x.prices) || {}) })).sort((a, b) => b.per90 - a.per90).slice(0, 80) };
+  return { parts: [...g.values()].filter((x) => !cfg.never_pull.includes(x.key)).map((x) => ({ key: x.key, name: x.name, cat: partCat(x.key, x.name), models: x.models.size, ...speedFrom(x.rows), ...(priceStats(x.prices) || {}), by_model: byModel(x.rows) })).sort((a, b) => b.per90 - a.per90).slice(0, 80) };
+}
+// Which cars a part's sales came from, fastest first
+function byModel(rows: any[]) {
+  const m = new Map<string, any>();
+  for (const r of rows) {
+    const x = m.get(r.model_key) || { model_key: r.model_key, make: r.make, model: r.model, yf: 9999, yt: 0, rows: [], prices: [] };
+    x.rows.push(r); x.prices.push(Number(r.price));
+    x.yf = Math.min(x.yf, r.fit_from ?? r.year_from ?? 9999); x.yt = Math.max(x.yt, r.fit_to ?? r.year_to ?? 0);
+    m.set(r.model_key, x);
+  }
+  return [...m.values()].map((x) => { const sp = speedFrom(x.rows), ps = priceStats(x.prices) || {} as any;
+    return { model_key: x.model_key, make: x.make, model: x.model, years: x.yt ? (x.yf === x.yt ? `${x.yf}` : `${x.yf}-${x.yt}`) : "", per90: sp.per90, every_days: sp.every_days, label: sp.label, median: ps.median, high: ps.high, n: x.rows.length }; })
+    .sort((a, b) => b.per90 - a.per90 || (b.high || 0) - (a.high || 0)).slice(0, 25);
 }
 async function partNumberInfo(pn: string) {
   const rows = (await rest("GET", `pm_interchange?part_number=eq.${enc(pn.toUpperCase().replace(/\s+/g, ""))}&select=*&limit=500`)) || [];
   const fits = new Map<string, any>();
   for (const r of rows) { const k = `${r.make}|${r.model}`; const f = fits.get(k) || { make: r.make, model: r.model, year_from: r.year_from, year_to: r.year_to, seen: 0, sources: new Set() }; f.year_from = Math.min(f.year_from ?? r.year_from, r.year_from ?? f.year_from); f.year_to = Math.max(f.year_to ?? r.year_to, r.year_to ?? f.year_to); f.seen++; f.sources.add(r.source); fits.set(k, f); }
   return { part_number: pn, fits: [...fits.values()].map((f) => ({ ...f, sources: [...f.sources] })), prices: priceStats(rows.map((r: any) => Number(r.price)).filter(Boolean)) };
+}
+
+// ---------- Car sales browser: every make / model / year with the parts researched and their sales ----------
+async function carSales(b: any) {
+  const make = String(b.make || "").trim(), mk = String(b.model_key || "").trim(), year = Number(b.year) || 0;
+  const size = ["small", "big"].includes(b.size) ? b.size : "small";
+  const days = Number(b.days) || 0;
+  const cfg = await settings();
+  // The list of everything researched (for the pickers)
+  const idx = (await rest("GET", "pm_sales_models?select=*&order=make,model&limit=5000")) || [];
+  const makes = [...new Set(idx.map((r: any) => r.make).filter(Boolean))].sort();
+  const models = idx.filter((r: any) => !make || r.make === make).map((r: any) => ({ model_key: r.model_key, make: r.make, model: r.model, year_from: r.year_from, year_to: r.year_to, sales: Number(r.sales) }));
+  let q = `pm_sales?size=eq.${size}&select=model_key,make,model,year_from,year_to,fit_from,fit_to,part_key,part_name,title,price,qty,period_days,sold_on,source&order=sold_on.desc.nullslast&limit=60000`;
+  if (mk) q += `&model_key=eq.${enc(mk)}`; else if (make) q += `&make=eq.${enc(make)}`;
+  if (days) q += `&or=(sold_on.gte.${new Date(Date.now() - days * 864e5).toISOString().slice(0, 10)},sold_on.is.null)`;
+  let rows = (await rest("GET", q)) || [];
+  if (year) rows = rows.filter((r: any) => { const a = r.fit_from ?? r.year_from, z = r.fit_to ?? r.year_to; return (!a || a <= year) && (!z || z >= year); });
+  rows = rows.filter((r: any) => !cfg.never_pull.includes(baseKey(r.part_key || "")));
+  const partsOf = (list: any[]) => {
+    const g = new Map<string, any>();
+    for (const r of list) {
+      const k = size === "small" ? baseKey(r.part_key || "") : (r.part_key || r.part_name || "other");
+      const x = g.get(k) || { key: k, name: String(r.part_name || k).replace(/, (driver|passenger)$/i, ""), rows: [], prices: [] };
+      x.rows.push(r); for (let i = 0; i < Math.max(1, Math.round(r.period_days ? 1 : Number(r.qty || 1))); i++) x.prices.push(Number(r.price));
+      g.set(k, x);
+    }
+    return [...g.values()].map((x) => { const sp = speedFrom(x.rows), ps = priceStats(x.prices) || {} as any;
+      return { key: x.key, name: x.name, cat: size === "small" ? partCat(x.key, x.name) : "large", n: x.rows.length, per90: sp.per90, every_days: sp.every_days, label: sp.label, trend: sp.trend, weeks: sp.weeks, last: sp.last,
+        low: ps.low, median: ps.median, high: ps.high, titles: x.rows.slice(0, 3).map((r: any) => ({ title: r.title, price: Number(r.price), sold_on: r.sold_on })) }; })
+      .sort((a, b) => b.per90 - a.per90 || (b.high || 0) - (a.high || 0));
+  };
+  // Parts that sell at least about once a month and are over your cutoff: what makes a car worth pulling
+  const fastValue = (parts: any[]) => parts.filter((p) => p.per90 >= 3 && (p.high || 0) >= cfg.part_min).reduce((t, p) => t + (p.high || 0), 0);
+  if (mk) {
+    const parts = partsOf(rows);
+    return { level: "parts", makes, models, model_key: mk, year: year || null, size, sales: rows.length, parts, fast_value: Math.round(fastValue(parts)), cutoff: cfg.part_min,
+      years: rows.length ? [Math.min(...rows.map((r: any) => r.fit_from ?? r.year_from).filter(Boolean)), Math.max(...rows.map((r: any) => r.fit_to ?? r.year_to).filter(Boolean))] : null };
+  }
+  const byM = new Map<string, any[]>();
+  for (const r of rows) { const a = byM.get(r.model_key) || []; a.push(r); byM.set(r.model_key, a); }
+  const list = [...byM.entries()].map(([k, rs]) => {
+    const parts = partsOf(rs), f = rs[0];
+    const fast = parts.filter((p) => p.per90 >= 3 && (p.high || 0) >= cfg.part_min);
+    return { model_key: k, make: f.make, model: f.model, years: [Math.min(...rs.map((r: any) => r.fit_from ?? r.year_from).filter(Boolean)), Math.max(...rs.map((r: any) => r.fit_to ?? r.year_to).filter(Boolean))],
+      sales: rs.length, per90: Math.round(parts.reduce((t, p) => t + p.per90, 0) * 10) / 10, part_types: parts.length, fast_parts: fast.length, fast_value: Math.round(fastValue(parts)),
+      top: fast.slice(0, 4).map((p) => ({ name: p.name, per90: p.per90, high: p.high })) };
+  }).sort((a, b) => b.fast_value - a.fast_value || b.per90 - a.per90);
+  return { level: "models", makes, models, make: make || null, year: year || null, size, sales: rows.length, list, cutoff: cfg.part_min };
 }
 
 // ===================================================================
@@ -1697,6 +1777,7 @@ export async function handle(req: Request): Promise<Response> {
       case "ebay_setup": return owner ? json(await ebaySellerSetup(body)) : ownerOnly();
       case "listing_draft": return owner ? json(await listingDraft(Number(body.id))) : ownerOnly();
       case "publish": return owner ? json(await publishItem(body)) : ownerOnly();
+      case "car_sales": return owner ? json(await carSales(body)) : ownerOnly();
       case "research_drop_code": return owner ? json(await makeDrop(body, who)) : ownerOnly();
       case "sync_orders": return owner ? json(await syncOrders()) : ownerOnly();
       case "template": {

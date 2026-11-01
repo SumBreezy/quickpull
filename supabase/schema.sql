@@ -210,6 +210,12 @@ create table if not exists pm_templates (
 );
 alter table pm_templates enable row level security;
 
+-- Every make / model with saved sales (for the Cars tab pickers)
+create or replace view pm_sales_models with (security_invoker = true) as
+  select model_key, min(make) as make, min(model) as model, min(coalesce(fit_from, year_from)) as year_from,
+         max(coalesce(fit_to, year_to)) as year_to, count(*) as sales
+  from pm_sales group by model_key;
+
 -- One-time drop codes: let a research page send its text straight to the server for one model (10 minutes, used once).
 -- No policies on purpose: only the server function reads it.
 create table if not exists pm_drops (
