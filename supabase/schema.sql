@@ -94,6 +94,10 @@ create table if not exists pm_items (
 );
 alter table pm_items add column if not exists grade    text;
 alter table pm_items add column if not exists stock_no text;
+alter table pm_items add column if not exists sku      text;
+-- Give every existing shelf item a SKU (stock number - part - grade - id)
+update pm_items set sku = coalesce(stock_no, 'NA') || '-' || upper(replace(coalesce(part_key, 'PART'), '_', '-')) || '-' || coalesce(grade, 'X') || '-' || id where sku is null;
+create unique index if not exists pm_items_sku on pm_items (sku);
 create index if not exists pm_items_status   on pm_items (status, created_at desc);
 create index if not exists pm_items_platform on pm_items (platform, part_key);
 
@@ -134,6 +138,18 @@ create table if not exists pm_settings (
   last_process_at  timestamptz
 );
 insert into pm_settings (id) values (1) on conflict (id) do nothing;
+alter table pm_settings add column if not exists never_pull     text[] not null default '{injectors}';  -- part types you never pull (data is kept)
+alter table pm_settings add column if not exists last_backup_at timestamptz;
+
+-- Your "Merge these" / "Not a duplicate" choices, remembered per make|model
+create table if not exists pm_merges (
+  model_key  text not null,
+  from_key   text not null,
+  to_key     text not null,
+  kind       text not null default 'merge' check (kind in ('merge','distinct')),
+  created_at timestamptz not null default now(),
+  primary key (model_key, from_key, to_key)
+);
 
 create table if not exists pm_usage (
   day    date primary key,
@@ -200,6 +216,7 @@ alter table pm_platforms  enable row level security;
 alter table pm_part_stats enable row level security;
 alter table pm_items      enable row level security;
 alter table pm_sales      enable row level security;
+alter table pm_merges     enable row level security;
 alter table pm_settings   enable row level security;
 alter table pm_usage      enable row level security;
 alter table pm_people     enable row level security;
@@ -213,6 +230,7 @@ drop policy if exists "owner" on pm_platforms;
 drop policy if exists "owner" on pm_part_stats;
 drop policy if exists "owner" on pm_items;
 drop policy if exists "owner" on pm_sales;
+drop policy if exists "owner" on pm_merges;
 drop policy if exists "owner" on pm_settings;
 drop policy if exists "owner" on pm_usage;
 drop policy if exists "owner" on pm_people;
@@ -223,6 +241,7 @@ create policy "owner" on pm_platforms  for all to authenticated using (pm_is_own
 create policy "owner" on pm_part_stats for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_items      for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_sales      for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
+create policy "owner" on pm_merges     for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_settings   for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_usage      for select to authenticated using (pm_is_owner());
 create policy "owner" on pm_people     for select to authenticated using (pm_is_owner());

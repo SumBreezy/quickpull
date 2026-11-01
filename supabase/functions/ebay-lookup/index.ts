@@ -172,14 +172,18 @@ export const isJunk = (title: string) => JUNK.test(title.toLowerCase()) || NOT_P
 export const isBig = (title: string) => BIG.test(` ${title.toLowerCase()} `);
 
 // Groups titles nobody tracks yet into a short part name, e.g. "Head Up Display", "Power Steering Control Module"
-const STOP = new Set(["oem","genuine","factory","used","oe","new","w","with","and","for","fits","fit","the","a","an","of","lh","rh","left","right","driver","passenger","front","rear","side","assembly","assy","unit","part","parts","number","pn","p/n","tested","working","good","great","nice","clean","low","miles","mileage","original","complete","only","set","pair","one","1","2","3","4","module","sensor","switch","motor","valve","control"]);
-const NOUNS = /\b(module|sensor|switch|motor|valve|unit|panel|camera|display|actuator|controller|computer|relay|solenoid|pump|speaker|subwoofer|receiver|antenna|bracket|cover|bezel|trim|light|lamp|harness|button|knob|vent|meter|horn|cluster|box|assembly)\b/;
+const STOP = new Set(["oem","genuine","factory","used","oe","new","w","with","and","for","fits","fit","the","a","an","of","lh","rh","left","right","driver","passenger","front","rear","side","assembly","assy","unit","part","parts","number","pn","p/n","tested","working","good","great","nice","clean","low","miles","mileage","original","complete","only","set","pair","one","module","sensor","switch","motor","valve","control",
+  "jdm","vin","digit","stk","stock","mi","im","km","hatchback","sedan","coupe","wagon","van","pickup","truck","suv","crew","cab","base","sport","limited","touring","premium","luxury","awd","fwd","rwd","4wd","2wd","4x4","4x2","automatic","manual","gas","gasoline","diesel","hybrid","cyl","dohc","sohc","liter","l","speed","free","shipping","fast","warranty","day","days","guaranteed","run","runs","ran","video","tested","lot","w/","w/o","without","inch","in","plug","play","pnp","programmed","ready","only","lx","ex","exl","ex-l","lt","ls","ltz","se","sel","sxt","gt","le","xle","xse","sr","sr5","sv","sl","s","x","xl","xlt","slt","st","gl","gls","glx","si","rs","ss","titanium","platinum","denali"]);
+const NOUNS = /\b(module|sensor|switch|valve|unit|panel|camera|display|actuator|controller|computer|relay|solenoid|pump|speaker|subwoofer|receiver|antenna|bracket|cover|bezel|trim|light|lamp|harness|button|knob|vent|meter|horn|cluster|box|assembly|engine|motor)\b/;
+const SYNONYMS: [RegExp, string][] = [[/\bmotor\b/g, "motor"], [/\bheads up\b/g, "head up"], [/\bhud\b/g, "head up display"], [/\bnav\b/g, "navigation"]];
+const GENERIC_CATEGORY = /^(ebay motors|parts & accessories|car & truck parts( & accessories)?|other( car & truck parts)?|interior parts & accessories|exterior parts & accessories|engines? & components|electrical components|lighting & lamps|body & frame|air & fuel delivery|engine cooling components|brakes & brake parts|suspension & steering|transmission & drivetrain|exhaust|other parts)$/i;
 export function discoverName(title: string, v: { make?: string; model?: string }): string {
-  let t = title.toLowerCase().replace(/[^a-z0-9/ -]+/g, " ");
-  const drop = [v.make, v.model, "chevy", "chevrolet", "gmc", "ford", "toyota", "honda", "nissan", "dodge", "jeep", "chrysler", "hyundai", "kia", "mazda", "subaru", "volkswagen", "vw", "bmw", "mercedes", "benz", "audi", "lexus", "acura", "infiniti", "buick", "cadillac", "lincoln", "ram", "mitsubishi", "volvo", "mini", "saturn", "pontiac", "mercury", "scion"]
-    .filter(Boolean).map((s) => String(s).toLowerCase());
+  let t = " " + title.toLowerCase().replace(/[^a-z0-9/ -]+/g, " ") + " ";
+  for (const [re, to] of SYNONYMS) t = t.replace(re, to);
+  const drop = [v.make, v.model, "chevy", "chevrolet", "gmc", "ford", "toyota", "honda", "nissan", "dodge", "jeep", "chrysler", "hyundai", "kia", "mazda", "subaru", "volkswagen", "vw", "bmw", "mercedes", "benz", "audi", "lexus", "acura", "infiniti", "buick", "cadillac", "lincoln", "ram", "mitsubishi", "volvo", "mini", "saturn", "pontiac", "mercury", "scion", "yaris", "auris", "corolla", "camry", "civic", "accord", "escalade", "tahoe", "suburban", "silverado", "sierra", "f150", "f-150", "equinox", "terrain", "malibu", "impala", "cruze", "focus", "fusion", "escape", "explorer", "altima", "sentra", "rogue", "elantra", "sonata", "optima", "soul", "jetta", "passat"]
+    .filter(Boolean).map((s) => " " + String(s).toLowerCase() + " ");
   for (const d of drop) t = t.split(d).join(" ");
-  const words = t.split(/\s+/).filter((w) => w && !/\d/.test(w) && w.length > 1);
+  const words = t.split(/\s+/).filter((w) => w && !/\d/.test(w) && w.length > 2);
   const nounAt = words.findIndex((w) => NOUNS.test(w));
   let pick: string[];
   if (nounAt >= 0) {
@@ -188,6 +192,22 @@ export function discoverName(title: string, v: { make?: string; model?: string }
   } else pick = words.filter((w) => !STOP.has(w)).slice(0, 3);
   const name = pick.join(" ").trim();
   return name ? name.replace(/\b[a-z]/g, (c) => c.toUpperCase()) : "";
+}
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+// eBay's own category is the most reliable name for a part type ("Head-Up Displays"); title words are the fallback
+export function discoverKey(title: string, category: string | undefined, v: any): { key: string; name: string } | null {
+  const cat = String(category || "").trim();
+  if (cat && !GENERIC_CATEGORY.test(cat)) return { key: "d:" + slug(cat), name: cat };
+  const nm = discoverName(title, v);
+  return nm ? { key: "d:" + slug(nm), name: nm } : null;
+}
+const tokens = (s: string) => new Set(s.toLowerCase().replace(/[^a-z ]/g, " ").split(/\s+/).filter((w) => w.length > 2 && !STOP.has(w)).map((w) => w.replace(/s$/, "")));
+export function similar(a: string, b: string) {
+  const A = tokens(a), B = tokens(b);
+  if (!A.size || !B.size) return 0;
+  let n = 0; for (const x of A) if (B.has(x)) n++;
+  if (n < 2 && !(A.size === 1 && B.size === 1 && n === 1)) return n ? 0.3 : 0; // one shared word ("engine") isn't enough
+  return n / Math.min(A.size, B.size);
 }
 
 // Prices: drop outliers, then rough (25th pct) / typical (median) / clean (75th pct)
@@ -203,8 +223,8 @@ export function priceStats(prices: number[]) {
 
 type Listing = { title: string; price: number; qty?: number; ship?: number | null; category?: string; date?: string };
 
-// Turns a pile of listings for one vehicle into per-part stats (tracked parts + newly discovered ones)
-export function aggregate(listings: Listing[], v: { make?: string; model?: string }, opts: { keepTracked: boolean; requireModel?: boolean }) {
+// Turns a pile of listings for one vehicle into per-part stats (tracked parts + newly discovered small parts)
+export function aggregate(listings: Listing[], v: { make?: string; model?: string }, opts: { keepTracked: boolean; requireModel?: boolean; minDiscovered?: number }) {
   const groups = new Map<string, { prices: number[]; qty: number; titles: string[]; name?: string }>();
   const excluded = { junk: 0, big: 0, other_vehicle: 0, too_few: 0 };
   const modelWord = String(v.model || "").toLowerCase().split(/[\s-]+/)[0];
@@ -219,21 +239,33 @@ export function aggregate(listings: Listing[], v: { make?: string; model?: strin
     const tl = l.title.toLowerCase();
     if (opts.requireModel && modelWord && !tl.includes(modelWord)) { excluded.other_vehicle++; continue; }
     if (isJunk(l.title)) { excluded.junk++; continue; }
-    const k = classify(l.title);
+    const k = classify(l.title) || (l.category ? classify(l.category) : null);
     if (k) {
       if (!opts.keepTracked) continue;
       if (k.endsWith("_x")) { const b = baseKey(k); add(b + "_l", l, 0.5); add(b + "_r", l, 0.5); }
       else add(k, l);
       continue;
     }
-    if (isBig(l.title) || (l.ship != null && l.ship > BIG_SHIPPING)) { excluded.big++; continue; }
-    const name = discoverName(l.title, v) || (l.category || "");
-    if (!name) continue;
-    add("d:" + name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""), l, 1, name);
+    // Large parts (engines, transmissions, doors…) never become "Also found"; they live in saved sales instead
+    const st = saleType(l.title, l.ship, v);
+    if (!st || st.size === "big" || (l.category && LARGE.some(([, , re]) => re.test(` ${l.category!.toLowerCase()} `)))) { excluded.big++; continue; }
+    const d = discoverKey(l.title, l.category, v);
+    if (!d) continue;
+    add(d.key, l, 1, d.name);
   }
+  // Merge near-identical discovered names into the bigger group ("Power Steering Module" + "Power Steering Control Module")
+  const disc = [...groups.entries()].filter(([k]) => k.startsWith("d:")).sort((a, b) => b[1].qty - a[1].qty);
+  for (let i = 0; i < disc.length; i++) {
+    const [ki, gi] = disc[i]; if (!groups.has(ki)) continue;
+    for (let j = i + 1; j < disc.length; j++) {
+      const [kj, gj] = disc[j]; if (!groups.has(kj)) continue;
+      if (similar(gi.name || ki, gj.name || kj) >= 0.67) { gi.prices.push(...gj.prices); gi.qty += gj.qty; for (const t of gj.titles) if (gi.titles.length < 3) gi.titles.push(t); groups.delete(kj); }
+    }
+  }
+  const min = opts.minDiscovered ?? 3;
   const out: { key: string; name?: string; count: number; stats: ReturnType<typeof priceStats>; titles: string[] }[] = [];
   for (const [key, g] of groups) {
-    if (key.startsWith("d:") && g.prices.length < 2) { excluded.too_few++; continue; }
+    if (key.startsWith("d:") && g.prices.length < min) { excluded.too_few++; continue; }
     out.push({ key, name: g.name, count: Math.round(g.qty * 10) / 10, stats: priceStats(g.prices), titles: g.titles });
   }
   return { groups: out, excluded };
@@ -336,7 +368,7 @@ async function caller(req: Request) {
 }
 async function settings() {
   const s = (await rest("GET", "pm_settings?id=eq.1&select=*"))?.[0];
-  return { part_min: Number(s?.part_min ?? 60), last_process_at: s?.last_process_at ?? null };
+  return { part_min: Number(s?.part_min ?? 60), last_process_at: s?.last_process_at ?? null, never_pull: (s?.never_pull ?? ["injectors"]) as string[], last_backup_at: s?.last_backup_at ?? null };
 }
 async function callsToday(): Promise<number> {
   const day = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
@@ -413,7 +445,7 @@ async function ebaySearch(kind: "active" | "sold", v: any, params: Record<string
     price: Number((kind === "sold" ? i.lastSoldPrice : i.price)?.value),
     qty: kind === "sold" ? Number(i.totalSoldQuantity) || 1 : 1,
     ship: i.shippingOptions?.[0]?.shippingCost ? Number(i.shippingOptions[0].shippingCost.value) : null,
-    category: i.categories?.[0]?.categoryName || "",
+    category: (i.categories || []).map((c: any) => String(c.categoryName || "")).find((n: string) => n && !GENERIC_CATEGORY.test(n)) || "",
   }));
   return { listings, total: Number(d.total ?? rows.length), mode, query: mode === "fitment" ? `${v.model} ${words} [${fit}]` : `${v.year} ${v.make} ${v.model} ${words}` };
 }
@@ -430,12 +462,14 @@ async function targetedPart(kind: "active" | "sold", v: any, key: string) {
 
 async function gatherPlatform(v: any, platform: string, needTargeted: boolean, needSweep: boolean) {
   const insights = env("EBAY_INSIGHTS").toLowerCase() === "on";
+  const { never_pull } = await settings();
+  const SEARCH = PARTS.filter(([key]) => !never_pull.includes(key));
   const notes = new Set<string>();
   const rows: any[] = [];
   const fatal = (e: unknown) => ["ebay_keys_missing", "ebay_auth_failed", "ebay_rate_limited"].includes((e as Error).message);
   if (needTargeted) {
-    for (let i = 0; i < PARTS.length; i += 8) {
-      const batch = PARTS.slice(i, i + 8);
+    for (let i = 0; i < SEARCH.length; i += 8) {
+      const batch = SEARCH.slice(i, i + 8);
       const res = await Promise.all(batch.map(async ([key]) => {
         const row: any = { platform, part_key: key, part_name: PART[key][1], group_name: PART[key][5], discovered: false };
         try {
@@ -464,7 +498,7 @@ async function gatherPlatform(v: any, platform: string, needTargeted: boolean, n
           all.push(...r.listings);
           if (r.listings.length < 200) break;
         }
-        const { groups } = aggregate(all, v, { keepTracked: false });
+        const { groups } = aggregate(all, v, { keepTracked: false, minDiscovered: 3 });
         for (const g of groups) {
           if (!g.stats) continue;
           const row: any = sweepRows.find((x) => x.part_key === g.key) || { platform, part_key: g.key, part_name: g.name, group_name: "Also found", discovered: true, sample_titles: g.titles };
@@ -490,13 +524,78 @@ export function cleanValue(r: any): number | null {
   if (r.ask_high != null && Number(r.active_count ?? 0) > 0) return Number(r.ask_high) * ASK_TO_SOLD;
   return null;
 }
-async function finalizePlatform(platform: string, partMin: number) {
-  const stats = (await rest("GET", `pm_part_stats?platform=eq.${enc(platform)}&select=part_key,ask_high,active_count,sold_high,sold_count,discovered`)) || [];
-  const over = stats.map(cleanValue).filter((x: number | null) => x != null && x >= partMin) as number[];
-  const est = Math.round(over.reduce((a, b) => a + b, 0));
+// One physical unit that eBay sells under two names: a car only counts it once
+const SAME_UNIT: string[][] = [["radio", "display"]];
+// Filter groups used everywhere in the app
+export function partCat(key: string, name = "", size = "small"): string {
+  if (size === "big" || key.startsWith("big:")) return "large";
+  const k = baseKey(key);
+  const M: Record<string, string> = {
+    ecm: "modules", bcm: "modules", tcm: "modules", abs: "modules", fusebox: "modules", gateway: "modules", telematics: "modules", keyless: "modules", fpdm: "modules", liftgate_mod: "modules", seat_mod: "modules", parkassist: "modules",
+    radio: "electronics", display: "electronics", hud: "electronics", cluster: "electronics", amp: "electronics", hvac: "electronics", media_hub: "electronics", clock_dash: "electronics",
+    window_master: "electronics", headlight_sw: "electronics", column_sw: "electronics", sw_controls: "electronics", seat_sw: "electronics", mirror_sw: "electronics", overhead: "electronics",
+    front_camera: "electronics", radar: "electronics", backup_cam: "electronics", bsm_sensor: "electronics", park_sensor: "electronics", tpms: "electronics", steer_angle: "electronics", rain_sensor: "electronics",
+    lock_act: "electronics", window_motor: "electronics", blend_door: "electronics",
+    headlight: "lights", taillight: "lights", mirror: "mirrors", rear_mirror: "mirrors",
+    emblems: "plastic", center_caps: "plastic", handle: "plastic", shifter: "plastic",
+    maf: "engine", o2: "engine", map_cam: "engine", throttle: "engine", coils: "engine", injectors: "engine", vvt: "engine", purge: "engine", blower_res: "engine",
+    keyfob: "keys", ignition: "keys", push_start: "keys",
+  };
+  if (M[k]) return M[k];
+  const n = ` ${name.toLowerCase()} `;
+  if (/\b(module|computer|controller|ecu|ecm|pcm|bcm|tcm)s?\b/.test(n)) return "modules";
+  if (/\b(light|lamp|headlight|taillight)s?\b/.test(n)) return "lights";
+  if (/\bmirrors?\b/.test(n)) return "mirrors";
+  if (/\b(key|fob|lock cylinder|ignition|immobilizer)s?\b/.test(n)) return "keys";
+  if (/\b(display|screen|radio|receiver|speaker|subwoofer|amp|amplifier|switch|switche|sensor|camera|button|antenna|cluster|gauge|navigation|dvd|player|charger|usb|actuator|motor|entertainment system)s?\b/.test(n)) return "electronics";
+  if (/\b(trim|bezel|cover|cap|emblem|badge|panel|handle|vent|grille|molding|garnish|console|lid|knob|visor|tray|holder)s?\b/.test(n)) return "plastic";
+  if (/\b(valve|solenoid|pump|throttle|coil|injector|manifold|tensioner|pulley|reservoir|canister|filter|housing)s?\b/.test(n)) return "engine";
+  return "other";
+}
+async function loadMerges(modelKeyStr: string) {
+  return ((await rest("GET", `pm_merges?model_key=eq.${enc(modelKeyStr)}&select=from_key,to_key,kind`)) || []) as { from_key: string; to_key: string; kind: string }[];
+}
+// Every part for one model year, with whether it counts toward the car's value and why not
+export function valueParts(stats: any[], cfg: { part_min: number; never_pull: string[] }, merges: { from_key: string; to_key: string; kind: string }[]) {
+  const byKey = new Map(stats.map((r: any) => [r.part_key, { ...r }]));
+  for (const m of merges.filter((m) => m.kind === "merge")) {
+    const from = byKey.get(m.from_key), to = byKey.get(m.to_key);
+    if (!from) continue;
+    if (to) {
+      to.sold_count = (Number(to.sold_count) || 0) + (Number(from.sold_count) || 0) || to.sold_count;
+      to.active_count = (Number(to.active_count) || 0) + (Number(from.active_count) || 0) || to.active_count;
+      for (const f of ["sold_low", "sold_median", "sold_high", "ask_low", "ask_median", "ask_high"]) if (to[f] == null && from[f] != null) to[f] = from[f];
+    }
+    from._merged_into = m.to_key;
+  }
+  const parts = [
+    ...PARTS.map(([key, name, words, size, pull, group, opt]) => ({ key, name, words, size, pull, group, opt, discovered: false, ...(byKey.get(key) as any || {}) })),
+    ...stats.filter((r: any) => r.discovered).map((r: any) => ({ key: r.part_key, name: r.part_name, words: r.part_name, size: "S", pull: 20, group: "Also found", opt: false, ...(byKey.get(r.part_key) as any) })),
+  ].map((p: any) => {
+    const clean = cleanValue(p);
+    let reason: string | null = null;
+    if (p._merged_into) reason = "merged";
+    else if (cfg.never_pull.includes(p.key) || cfg.never_pull.includes(baseKey(p.key))) reason = "never_pull";
+    else if (clean == null) reason = "no_data";
+    else if (clean < cfg.part_min) reason = "under_cutoff";
+    return { ...p, clean, cat: partCat(p.key, p.name, "small"), counted: !reason, reason };
+  });
+  for (const grp of SAME_UNIT) {
+    const live = parts.filter((p) => p.counted && grp.includes(p.key)).sort((a, b) => b.clean - a.clean);
+    for (const p of live.slice(1)) { p.counted = false; p.reason = "same_unit"; p.same_as = live[0].key; }
+  }
+  return parts;
+}
+async function finalizePlatform(platform: string, partMin?: number) {
+  const cfg = await settings();
+  if (partMin != null) cfg.part_min = partMin;
+  const stats = (await rest("GET", `pm_part_stats?platform=eq.${enc(platform)}&select=part_key,part_name,ask_high,active_count,sold_high,sold_count,discovered`)) || [];
+  const merges = await loadMerges(platform.split("|").slice(0, 2).join("|"));
+  const counted = valueParts(stats, cfg, merges).filter((p) => p.counted);
+  const est = Math.round(counted.reduce((a, p) => a + p.clean, 0));
   await rest("PATCH", `pm_vehicles?platform=eq.${enc(platform)}&status=${inList(["queued", "ready", "error"])}`,
-    { status: "ready", status_note: null, est_value: est, pull_count: over.length, destination: over.length ? "pull" : "shred" }, "return=minimal");
-  return { est, count: over.length };
+    { status: "ready", status_note: null, est_value: est, pull_count: counted.length, destination: counted.length ? "pull" : "shred" }, "return=minimal");
+  return { est, count: counted.length };
 }
 
 // ---------- Actions ----------
@@ -587,6 +686,25 @@ async function processQueue(budgetMs: number) {
     } finally { await addCalls(callCount - before); }
     if (["ebay_keys_missing", "ebay_auth_failed", "ebay_rate_limited", "service_key_missing"].some((n) => notes.has(n))) break;
   }
+  // 3. re-run discovery sweeps that were cleared (e.g. by "Clean up duplicates"), a few per run
+  if (Date.now() - t0 < budgetMs && !["ebay_keys_missing", "ebay_auth_failed", "ebay_rate_limited", "daily_cap"].some((n) => notes.has(n))) {
+    const stale = (await rest("GET", "pm_platforms?sweep_at=is.null&targeted_at=not.is.null&select=*&limit=15")) || [];
+    for (const p of stale) {
+      if (Date.now() - t0 > budgetMs) break;
+      if ((await callsToday()) + 5 > DAILY_CALL_CAP) { notes.add("daily_cap"); break; }
+      const claimed = await rest("PATCH", `pm_platforms?platform=eq.${enc(p.platform)}&or=(locked_until.is.null,locked_until.lt.${enc(nowIso())})`, { locked_until: new Date(Date.now() + 5 * 60_000).toISOString() }, "return=representation");
+      if (!claimed?.length) continue;
+      const before = callCount;
+      try {
+        const g = await gatherPlatform({ year: p.year, make: p.make, model: p.model }, p.platform, false, true);
+        await rest("PATCH", `pm_platforms?platform=eq.${enc(p.platform)}`, { ...(g.sweepOk ? { sweep_at: nowIso() } : {}), locked_until: null }, "return=minimal");
+        await finalizePlatform(p.platform, part_min);
+      } catch (e) { notes.add((e as Error).message); await rest("PATCH", `pm_platforms?platform=eq.${enc(p.platform)}`, { locked_until: null }, "return=minimal"); }
+      finally { await addCalls(callCount - before); }
+    }
+  }
+  // 4. weekly backup into Supabase Storage
+  try { const s = await settings(); if (daysOld(s.last_backup_at) >= 7) await storeBackup(); } catch (e) { notes.add("backup_failed: " + (e as Error).message); }
   await rest("PATCH", "pm_settings?id=eq.1", { last_process_at: nowIso() }, "return=minimal");
   const left = (await rest("GET", "pm_vehicles?status=eq.queued&select=platform")) || [];
   return { models_done: done, cars_waiting: left.length, models_waiting: new Set(left.map((l: any) => l.platform)).size, ebay_calls: callCount, calls_today: await callsToday(), notes: [...notes] };
@@ -598,17 +716,26 @@ async function carData(id: number) {
   return { vehicle: v, ...(await platformData(v.platform)) };
 }
 async function platformData(platform: string) {
-  const [stats, plat, s] = await Promise.all([
+  const mk = platform.split("|").slice(0, 2).join("|");
+  const [stats, plat, cfg, merges] = await Promise.all([
     rest("GET", `pm_part_stats?platform=eq.${enc(platform)}&select=*`),
     rest("GET", `pm_platforms?platform=eq.${enc(platform)}&select=*`),
     settings(),
+    loadMerges(mk),
   ]);
-  const byKey = new Map((stats || []).map((r: any) => [r.part_key, r]));
-  const parts = [
-    ...PARTS.map(([key, name, words, size, pull, group, opt]) => ({ key, name, words, size, pull, group, opt, ...(byKey.get(key) as any || {}) })),
-    ...(stats || []).filter((r: any) => r.discovered).map((r: any) => ({ key: r.part_key, name: r.part_name, words: r.part_name, size: "S", pull: 20, group: "Also found", opt: false, ...r })),
-  ].map((p: any) => ({ ...p, clean: cleanValue(p) }));
-  return { platform, platform_info: plat?.[0] || null, parts, part_min: s.part_min };
+  const parts = valueParts(stats || [], cfg, merges);
+  // Possible duplicates the rules missed: similar names, both still counted, not already ruled on
+  const ruled = new Set(merges.map((m) => [m.from_key, m.to_key].sort().join("~")));
+  const shown = parts.filter((p) => p.counted);
+  const suggestions: { a: string; b: string }[] = [];
+  for (let i = 0; i < shown.length; i++) for (let j = i + 1; j < shown.length; j++) {
+    const A = shown[i], B = shown[j];
+    if (!A.discovered && !B.discovered) continue;
+    if (baseKey(A.key) === baseKey(B.key)) continue;
+    if (ruled.has([A.key, B.key].sort().join("~"))) continue;
+    if (similar(A.name, B.name) >= 0.5) suggestions.push(A.discovered ? { a: A.key, b: B.key } : { a: B.key, b: A.key });
+  }
+  return { platform, model_key: mk, platform_info: plat?.[0] || null, parts, part_min: cfg.part_min, never_pull: cfg.never_pull, duplicate_suggestions: suggestions.slice(0, 10) };
 }
 
 // ---------- Every sale you paste is kept: small parts feed pull sheets, large parts are saved for later ----------
@@ -623,13 +750,14 @@ const LARGE: [string, string, RegExp][] = [
   ["liftgate", "Trunk lid / liftgate / tailgate", /\b(trunk lid|deck ?lid|lift ?gate|tail ?gate|hatch)\b(?! (module|motor|strut|handle|latch|switch|camera|light|lamp|emblem|badge))/],
   ["fender", "Fender", /\bfender\b(?! (liner|flare|trim|emblem|badge))/],
   ["bumper", "Bumper", /\bbumper\b(?! (sensor|bracket|reinforcement absorber))/],
-  ["quarter", "Quarter panel / body section", /\bquarter panel|\bbody section|\brocker panel|\broof (panel|skin)/],
+  ["quarter", "Quarter panel / body section / pillar", /\bquarter panel|\bbody section|\brocker panel|\broof (panel|skin)|\b(a|b|c|center) pillar|\bpillars?\b|\bfloor ?pan|\bfirewall|\bcore support|\bframe (rail|section)/],
+  ["bed", "Truck bed / cab", /\b(pickup|truck|cargo) (bed|box)|\bbed (assembly|box)|\btruck beds?\b|\bcab (assembly|shell)|\bcabs?\b(?! (light|lamp|filter|mount))/],
   ["grille", "Grille", /\bgrille?\b/],
   ["radiator", "Radiator / condenser / fan", /\bradiator\b(?! (cap|hose|support))|\bcondenser|\bcooling fan|\bfan (assembly|shroud)|\bintercooler/],
   ["seat", "Seat", /\bseats?\b(?! ?(belt|entertainment|switch|module|heater|heat|motor|track|buckle|control|memory|cover))/],
   ["wheel", "Wheel / rim", /\bwheels?\b(?! (speed|bearing|hub|cap|center|lug|well|arch|liner|sensor|control|opening))|\brims?\b/],
   ["tire", "Tire", /\btires?\b(?! pressure)/],
-  ["steering", "Steering column / rack / wheel", /\bsteering (column|rack|gear|wheel)\b(?! (control|button|switch|audio))|\brack and pinion/],
+  ["steering", "Steering column / rack / wheel", /\bsteering (column|rack|gear|wheel|box)(es)?\b(?! (control|button|switch|audio))|\brack (and |& |n )?pinion|\bgear ?box/],
   ["alternator", "Alternator", /\balternator/],
   ["starter", "Starter", /\bstarter( motor)?\b/],
   ["ac_compressor", "A/C compressor", /\ba\/?c compressor|\bac compressor|\bcompressor\b/],
@@ -683,7 +811,7 @@ function summarize(sales: any[], scale = (s: any) => Number(s.qty || 1)) {
     const d = s.date || s.sold_on; if (d && (!x.last || d > x.last)) x.last = d;
     g.set(key, x);
   }
-  return [...g.values()].map((x) => ({ key: x.key, name: x.name, size: x.size, count: Math.round(x.count * 10) / 10, last: x.last || null, titles: x.titles, ...(priceStats(x.prices) || {}) }))
+  return [...g.values()].map((x) => ({ key: x.key, name: x.name, size: x.size, cat: partCat(x.key, x.name, x.size), count: Math.round(x.count * 10) / 10, last: x.last || null, titles: x.titles, ...(priceStats(x.prices) || {}) }))
     .sort((a: any, b: any) => (b.high ?? 0) * b.count - (a.high ?? 0) * a.count);
 }
 
@@ -721,6 +849,7 @@ async function rebuildPlatformFromSales(v: any, year: number) {
     const st = priceStats(prices);
     if (!st) continue;
     const disc = key.startsWith("d:");
+    if (disc && prices.length < 2) continue; // one stray sale isn't a part type yet
     out.push({ platform, part_key: key, sold_count: Math.round(count * 10) / 10, sold_low: st.low, sold_median: st.median, sold_high: st.high, sold_source: "manual", sold_updated: nowIso(),
       part_name: disc ? list[0].part_name : PART[key]?.[1] ?? list[0].part_name, group_name: disc ? "Also found" : PART[key]?.[5] ?? null, discovered: disc, sample_titles: titles });
   }
@@ -765,6 +894,102 @@ async function modelSales(v: any) {
   return { total_sales: rows.reduce((n: number, r: any) => n + Number(r.qty || 1), 0), years, small: all.filter((g) => g.size === "small"), big: all.filter((g) => g.size === "big") };
 }
 
+// One-time cleanup: drop sweep results made with the old rules and re-run every sweep with the new ones
+async function cleanupDiscovered() {
+  await rest("DELETE", "pm_part_stats?discovered=is.true&ask_mode=eq.sweep&sold_source=is.null", undefined, "return=minimal");
+  await rest("PATCH", "pm_part_stats?discovered=is.true&ask_mode=eq.sweep", { active_count: null, ask_low: null, ask_median: null, ask_high: null, ask_mode: null }, "return=minimal");
+  await rest("PATCH", "pm_platforms?sweep_at=not.is.null", { sweep_at: null }, "return=minimal");
+  const r = await recomputeAll();
+  return { ...r, note: "Old 'Also found' rows removed. The background timer re-checks each model with the new rules, a few every 5 minutes." };
+}
+async function setMerge(body: any) {
+  const mk = String(body.model_key || ""), from = String(body.from_key || ""), to = String(body.to_key || ""), kind = body.kind === "distinct" ? "distinct" : "merge";
+  if (!mk || !from || !to || from === to) return { error: "Pick two different parts." };
+  await rest("POST", "pm_merges?on_conflict=model_key,from_key,to_key", [{ model_key: mk, from_key: from, to_key: to, kind }], "resolution=merge-duplicates,return=minimal");
+  const plats = ((await rest("GET", `pm_platforms?platform=like.${enc(mk)}|*&select=platform`)) || []).map((p: any) => p.platform);
+  for (const p of plats) await finalizePlatform(p);
+  return { ok: true, models: plats.length };
+}
+// Data page: totals by part type across the cars you bought, computed the same way as each car's value
+async function dataSummary(body: any) {
+  const days = Math.max(1, Math.min(3650, Number(body.days) || 30));
+  const since = new Date(Date.now() - days * 864e5).toISOString();
+  let q = `pm_vehicles?scanned_at=gte.${enc(since)}&platform=neq.&select=id,platform,year,make,model,decision,destination,scanned_at&limit=5000`;
+  if (body.make) q += `&make=eq.${enc(body.make)}`;
+  if (body.model) q += `&model=eq.${enc(body.model)}`;
+  const cars = (await rest("GET", q)) || [];
+  const plats = [...new Set(cars.map((c: any) => c.platform))] as string[];
+  const cfg = await settings();
+  const stats: any[] = [];
+  for (let i = 0; i < plats.length; i += 40) stats.push(...((await rest("GET", `pm_part_stats?platform=${inList(plats.slice(i, i + 40))}&select=*`)) || []));
+  const mks = [...new Set(plats.map((p) => p.split("|").slice(0, 2).join("|")))];
+  const merges: any[] = mks.length ? ((await rest("GET", `pm_merges?model_key=${inList(mks)}&select=*`)) || []) : [];
+  const byPlat = new Map<string, any[]>();
+  for (const p of plats) {
+    const mk = p.split("|").slice(0, 2).join("|");
+    byPlat.set(p, valueParts(stats.filter((r) => r.platform === p), cfg, merges.filter((m) => m.model_key === mk)));
+  }
+  const parts = new Map<string, any>(), models = new Map<string, any>();
+  for (const car of cars) {
+    const list = byPlat.get(car.platform) || [];
+    for (const r of list) {
+      if (!r.counted) continue;
+      const sold = r.sold_high != null;
+      if (body.sold_only && !sold) continue;
+      const k = r.discovered ? "d:" + slug(r.name) : baseKey(r.key);
+      const g = parts.get(k) || { key: k, name: r.discovered ? r.name : String(r.name).replace(/, (driver|passenger)$/, ""), cat: r.cat, discovered: r.discovered, cars: new Set(), total: 0, n: 0, sold: 0 };
+      g.cars.add(car.id); g.total += r.clean; g.n++; if (sold) g.sold++;
+      parts.set(k, g);
+    }
+    const counted = list.filter((r) => r.counted && (!body.sold_only || r.sold_high != null));
+    const m = models.get(car.platform) || { platform: car.platform, year: car.year, make: car.make, model: car.model, cars: 0, value: counted.reduce((a, r) => a + r.clean, 0), sold_parts: counted.filter((r) => r.sold_high != null).length };
+    m.cars++; models.set(car.platform, m);
+  }
+  // Large parts: from saved sales of these models (never added to any car's value)
+  let large: any[] = [];
+  if (mks.length) {
+    const sales: any[] = [];
+    for (let i = 0; i < mks.length; i += 40) sales.push(...((await rest("GET", `pm_sales?model_key=${inList(mks.slice(i, i + 40))}&size=eq.big&select=part_key,part_name,size,price,qty,sold_on,title&limit=20000`)) || []));
+    large = summarize(sales).map((g: any) => ({ ...g, cat: "large" }));
+  }
+  return {
+    days, cars: cars.length, part_min: cfg.part_min,
+    parts: [...parts.values()].map((g) => ({ key: g.key, name: g.name, cat: g.cat, discovered: g.discovered, cars: g.cars.size, avg: g.total / g.n, total: g.total, sold_share: g.n ? g.sold / g.n : 0 })).sort((a, b) => b.total - a.total),
+    models: [...models.values()].sort((a, b) => b.value - a.value),
+    large,
+    makes: [...new Set(cars.map((c: any) => c.make).filter(Boolean))].sort(),
+  };
+}
+// ---------- Backups ----------
+const BACKUP_TABLES = ["pm_vehicles", "pm_platforms", "pm_part_stats", "pm_sales", "pm_items", "pm_settings", "pm_people", "pm_merges", "pm_usage"];
+async function dumpTable(t: string) {
+  const out: any[] = [];
+  for (let off = 0; off < 500000; off += 1000) {
+    const r = await fetch(`${env("SUPABASE_URL")}/rest/v1/${t}?select=*`, { headers: { ...serviceHeaders(), Range: `${off}-${off + 999}`, "Range-Unit": "items" } });
+    if (!r.ok) break;
+    const rows = await r.json(); out.push(...rows);
+    if (rows.length < 1000) break;
+  }
+  return out;
+}
+export async function buildBackup() {
+  const data: Record<string, any[]> = {};
+  for (const t of BACKUP_TABLES) { try { data[t] = await dumpTable(t); } catch { data[t] = []; } }
+  return { app: "QuickPull", made_at: nowIso(), tables: data };
+}
+async function storeBackup() {
+  const b = await buildBackup();
+  const url = env("SUPABASE_URL");
+  const h = serviceHeaders();
+  const hb = { ...h, Authorization: (h as any).Authorization || `Bearer ${(h as any).apikey}` };
+  await fetch(`${url}/storage/v1/bucket`, { method: "POST", headers: { ...hb, "Content-Type": "application/json" }, body: JSON.stringify({ id: "backups", name: "backups", public: false }) }).catch(() => null);
+  const name = `quickpull-${b.made_at.slice(0, 10)}.json`;
+  const r = await fetch(`${url}/storage/v1/object/backups/${name}`, { method: "POST", headers: { ...hb, "Content-Type": "application/json", "x-upsert": "true" }, body: JSON.stringify(b) });
+  if (!r.ok) throw new Error(`storage_${r.status}`);
+  await rest("PATCH", "pm_settings?id=eq.1", { last_backup_at: nowIso() }, "return=minimal");
+  return { stored: name, rows: Object.fromEntries(Object.entries(b.tables).map(([k, v]) => [k, v.length])) };
+}
+
 async function recomputeAll() {
   const { part_min } = await settings();
   const plats = (await rest("GET", "pm_vehicles?status=eq.ready&select=platform")) || [];
@@ -787,7 +1012,7 @@ export async function handle(req: Request): Promise<Response> {
         const s = await settings();
         return json({
           role: who.role, ebay_keys: !!(env("EBAY_CLIENT_ID") && env("EBAY_CLIENT_SECRET")), insights: env("EBAY_INSIGHTS").toLowerCase() === "on",
-          cron: !!env("CRON_SECRET"), last_process_at: s.last_process_at, part_min: s.part_min, calls_today: owner ? await callsToday() : undefined, call_cap: DAILY_CALL_CAP,
+          cron: !!env("CRON_SECRET"), last_process_at: s.last_process_at, part_min: s.part_min, never_pull: s.never_pull, last_backup_at: s.last_backup_at, ai: !!env("ANTHROPIC_API_KEY"), calls_today: owner ? await callsToday() : undefined, call_cap: DAILY_CALL_CAP,
         });
       }
       case "checkin": return json(await checkin(Array.isArray(body.vins) ? body.vins : String(body.vins || "").split(/[\s,;]+/), who));
@@ -798,6 +1023,11 @@ export async function handle(req: Request): Promise<Response> {
       case "research_save": return owner ? json(await researchSave(String(body.text || ""), body.vehicle || {}, Number(body.year_from), Number(body.year_to), Number(body.period_days) || null, who)) : ownerOnly();
       case "model_sales": return owner ? json(await modelSales(body.vehicle || {})) : ownerOnly();
       case "recompute": return owner ? json(await recomputeAll()) : ownerOnly();
+      case "cleanup": return owner ? json(await cleanupDiscovered()) : ownerOnly();
+      case "merge": return owner ? json(await setMerge(body)) : ownerOnly();
+      case "data": return owner ? json(await dataSummary(body)) : ownerOnly();
+      case "backup": return owner ? json(await buildBackup()) : ownerOnly();
+      case "backup_store": return owner || who.role === "cron" ? json(await storeBackup()) : ownerOnly();
       default: return json({ error: "Unknown action." }, 400);
     }
   } catch (e) {
