@@ -129,6 +129,61 @@ create table if not exists pm_sales (
 create index if not exists pm_sales_model on pm_sales (model_key, size, year_from, year_to);
 create index if not exists pm_sales_part  on pm_sales (part_key);
 
+alter table pm_sales add column if not exists part_numbers text[];   -- OEM part numbers found in the title
+alter table pm_sales add column if not exists fit_from     int;      -- years the title says it fits, e.g. "2010-2015"
+alter table pm_sales add column if not exists fit_to       int;
+create index if not exists pm_sales_pn on pm_sales using gin (part_numbers);
+
+------------------------------------------------------------------
+-- Model generations (found automatically from Wikipedia by Claude, editable by you)
+------------------------------------------------------------------
+create table if not exists pm_generations (
+  id            bigint generated always as identity primary key,
+  model_key     text not null,          -- make|model
+  make          text,
+  model         text,
+  gen_name      text,
+  year_from     int not null,
+  year_to       int not null,
+  refresh_years int[],                  -- mid-cycle facelifts (lights, bumpers, radios often change)
+  sisters       jsonb,                  -- [{make, model, year_from, year_to}] cars that share many parts
+  notes         text,
+  source_url    text,
+  confidence    text,
+  edited        boolean not null default false,   -- you changed it; automatic lookups leave it alone
+  created_at    timestamptz not null default now(),
+  unique (model_key, year_from)
+);
+create table if not exists pm_model_lookups (
+  model_key  text primary key,
+  make       text,
+  model      text,
+  status     text,          -- ok | failed | no_article
+  error      text,
+  tried_at   timestamptz not null default now()
+);
+
+------------------------------------------------------------------
+-- Same part, different car: every OEM part number we've seen and what it came off or fits
+------------------------------------------------------------------
+create table if not exists pm_interchange (
+  id          bigint generated always as identity primary key,
+  part_number text not null,
+  part_key    text,
+  part_name   text,
+  make        text,
+  model       text,
+  year_from   int,
+  year_to     int,
+  source      text not null,         -- sold-title | pulled | photo
+  ref         text not null,         -- sale id, SKU, or photo id
+  price       numeric,
+  created_at  timestamptz not null default now(),
+  unique (part_number, source, ref)
+);
+create index if not exists pm_interchange_pn on pm_interchange (part_number);
+create index if not exists pm_interchange_model on pm_interchange (make, model);
+
 ------------------------------------------------------------------
 -- Settings, eBay usage, and who is who
 ------------------------------------------------------------------
@@ -217,6 +272,9 @@ alter table pm_part_stats enable row level security;
 alter table pm_items      enable row level security;
 alter table pm_sales      enable row level security;
 alter table pm_merges     enable row level security;
+alter table pm_interchange enable row level security;
+alter table pm_model_lookups enable row level security;
+alter table pm_generations enable row level security;
 alter table pm_settings   enable row level security;
 alter table pm_usage      enable row level security;
 alter table pm_people     enable row level security;
@@ -231,6 +289,9 @@ drop policy if exists "owner" on pm_part_stats;
 drop policy if exists "owner" on pm_items;
 drop policy if exists "owner" on pm_sales;
 drop policy if exists "owner" on pm_merges;
+drop policy if exists "owner" on pm_interchange;
+drop policy if exists "owner" on pm_model_lookups;
+drop policy if exists "owner" on pm_generations;
 drop policy if exists "owner" on pm_settings;
 drop policy if exists "owner" on pm_usage;
 drop policy if exists "owner" on pm_people;
@@ -242,6 +303,9 @@ create policy "owner" on pm_part_stats for all to authenticated using (pm_is_own
 create policy "owner" on pm_items      for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_sales      for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_merges     for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
+create policy "owner" on pm_interchange for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
+create policy "owner" on pm_model_lookups for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
+create policy "owner" on pm_generations for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_settings   for all to authenticated using (pm_is_owner()) with check (pm_is_owner());
 create policy "owner" on pm_usage      for select to authenticated using (pm_is_owner());
 create policy "owner" on pm_people     for select to authenticated using (pm_is_owner());

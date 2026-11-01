@@ -168,6 +168,28 @@ function chips(opts={}){
   return `<div class="chips" role="group" aria-label="Filter by part type"><button class="chip-f" data-act="cat" data-c="" aria-pressed="${!S.cats.length}">All</button>${list.map(([k,l])=>`<button class="chip-f" data-act="cat" data-c="${k}" aria-pressed="${S.cats.includes(k)}">${l}</button>`).join('')}</div>`;
 }
 const catOk = c => !S.cats.length || S.cats.includes(c||'other');
+function spark(weeks){
+  const max=Math.max(1,...weeks), w=8, gap=3, h=28;
+  return `<svg width="${weeks.length*(w+gap)}" height="${h+12}" role="img" aria-label="Sales per week, last 12 weeks: ${weeks.join(', ')}">${weeks.map((n,i)=>`<rect x="${i*(w+gap)}" y="${h-Math.round(n/max*h)}" width="${w}" height="${Math.max(1,Math.round(n/max*h))}" rx="2" fill="${n?'var(--action)':'var(--line)'}"/>`).join('')}<text x="0" y="${h+11}" font-size="9" fill="var(--muted)">12 wks ago</text><text x="${weeks.length*(w+gap)-gap}" y="${h+11}" font-size="9" fill="var(--muted)" text-anchor="end">this wk</text></svg>`;
+}
+const SPEED = {fast:'Fast seller', steady:'Steady', slow:'Slow', unknown:'No sold dates'};
+const TREND = {up:' ↑', down:' ↓', flat:''};
+function speedText(sp){ if(!sp||!sp.per90) return ''; return sp.every_days<=1.5?`sells ~${Math.round(sp.per_week)}/week`:`sells every ${sp.every_days} days`; }
+function genLine(g, lk, v){
+  if(!g){
+    if(!lk) return `<span class="muted">Generation: looking it up in the background…</span> <button class="linkbtn" data-act="lookupgen">Look up now</button>`;
+    return `<span class="muted">Generation: ${lk.status==='no_article'?'no Wikipedia article found':'not found yet'}.</span> <button class="linkbtn" data-act="lookupgen">Try again</button> · <button class="linkbtn" data-act="editgen">Set it yourself</button>`;
+  }
+  const sis=(g.sisters||[]).map(x=>`${x.make} ${x.model} ${x.year_from}–${x.year_to}`).join(', ');
+  return `<b>Generation ${g.year_from}–${g.year_to}</b>${g.refresh_years?.length?` · facelift ${g.refresh_years.join(', ')} (lights, bumpers, radios may differ)`:''}${sis?` · shares parts with ${esc(sis)}`:''} · <span class="muted">${g.edited?'set by you':`rough estimate from <a href="${esc(g.source_url)}" target="_blank" rel="noopener">Wikipedia ↗</a>`}</span> · <button class="linkbtn" data-act="editgen">Edit</button>`;
+}
+function genEditor(){
+  const E=S.genEdit; if(!E) return '';
+  return `<form class="panel panel-b stack" data-form="gen"><h3>Generation for ${esc(E.vehicle.make)} ${esc(E.vehicle.model)}</h3>
+   <div class="row"><input class="inp" style="width:100px" name="yf" inputmode="numeric" value="${esc(E.year_from)}"><span>to</span><input class="inp" style="width:100px" name="yt" inputmode="numeric" value="${esc(E.year_to)}"></div>
+   <label class="field"><span class="label">Shares parts with (one per line, e.g. "GMC Terrain 2010-2017")</span><textarea class="inp" name="sis" rows="3">${esc(E.sisters)}</textarea></label>
+   <div class="row"><button class="btn sm">Save</button><button type="button" class="btn sm ghost" data-act="canceledit">Cancel</button></div></form>`;
+}
 const REASON = {under_cutoff:'Under the cutoff', never_pull:'On your Never-pull list', same_unit:'Same unit as another part', merged:'Merged into another part', no_data:'No price data yet'};
 const destOf = v => v.decision || v.destination || 'waiting';
 
@@ -266,6 +288,7 @@ function vCar(){
   <div class="panel"><div class="panel-h"><div class="stack" style="gap:4px"><div class="row" style="gap:8px"><span class="stock" style="font-size:1rem">${esc(v.stock_no||'—')}</span><h2>${esc(vName(v))}</h2></div><div class="small muted">${esc([v.trim,v.engine,v.body].filter(Boolean).join(' · '))}</div><div class="mono small muted">${esc(v.vin)}</div></div>
    <span class="chip ${cls}">${label}</span></div>
    <div class="panel-b stack"><div class="row small"><span class="muted">Send to:</span>${['pull','shred'].map(k=>`<button class="btn sm ${dst===k&&v.decision?'':'quiet'}" data-act="decide" data-d="${k}">${k==='pull'?'Pull area':'Shred'}</button>`).join('')}${v.decision?`<button class="linkbtn small" data-act="decide" data-d="">Use automatic</button>`:''}</div>
+   <p class="small">${genLine(d.generation,d.generation_lookup,v)}</p>${genEditor()}
    <p class="small muted">Prices: ${anySold?'sold data where available, otherwise':''} used OEM listings on eBay${pi.targeted_at?`, checked ${ago(pi.targeted_at)}`:''}. ${pi.researched_at?`You researched this model ${ago(pi.researched_at)}.`:'No sold research yet.'} <button class="linkbtn" data-act="research" data-from="car">Research sold prices</button></p></div></div>
   ${v.status!=='ready'&&!all.length?`<div class="panel empty"><span class="spinner"></span><p class="muted">Waiting for eBay data on this model. It usually takes a few minutes.</p></div>`:''}
   <div class="verdict"><span class="label" style="color:inherit;opacity:.75">Pull sheet · parts worth ${money(min)}+ when clean</span>
@@ -288,10 +311,12 @@ function partRow(p){
   return `<div class="prow"><button class="ph" data-act="open" data-k="${esc(p.key)}" aria-expanded="${!!open}">
     <span><span class="nm">${esc(p.name)}</span>${p.opt?' <span class="chip steady" style="font-size:.7rem">Check if equipped</span>':''}${!p.counted&&p.reason?` <span class="chip unknown" style="font-size:.7rem">${esc(REASON[p.reason]||p.reason)}</span>`:''}</span>
     <span class="val"><b>${money(p.clean)}</b><span class="small muted">clean</span></span>
-    <span class="meta"><span>${money(takeHome(p.clean,p.size))} take-home</span>${sold?`<span class="chip fast">${Math.round(p.sold_count)} sold / 90d</span>`:`<span>${p.active_count??0} listed · asking</span>`}<span>Bin ${bin}</span></span></button>
+    <span class="meta"><span>${money(takeHome(p.clean,p.size))} take-home</span>${p.speed?.per90?`<span class="chip ${p.speed.label==='fast'?'fast':p.speed.label==='steady'?'steady':'slow'}">${SPEED[p.speed.label]}${TREND[p.speed.trend]||''}</span><span>${speedText(p.speed)}</span>`:sold?`<span class="chip fast">${Math.round(p.sold_count)} sold / 90d</span>`:`<span>${p.active_count??0} listed · asking</span>`}${p.part_numbers?.length?`<span class="mono">#${esc(p.part_numbers[0].pn)}${p.part_numbers.length>1?` +${p.part_numbers.length-1}`:''}</span>`:''}<span>Bin ${bin}</span></span></button>
    ${open?`<div class="detail">
     <div class="kv"><div><span class="label">Clean</span><b>${money(sold?p.sold_high:p.ask_high)}</b></div><div><span class="label">Typical</span><b>${money(sold?p.sold_median:p.ask_median)}</b></div><div><span class="label">Rough</span><b>${money(sold?p.sold_low:p.ask_low)}</b></div><div><span class="label">${sold?'Sold 90 days':'Listed now'}</span><b>${sold?Math.round(p.sold_count):p.active_count??'—'}</b></div></div>
     ${sold&&p.ask_high!=null?`<p class="small muted">Asking now: ${money(p.ask_low)}–${money(p.ask_high)} across ${p.active_count} listings.</p>`:''}
+    ${p.speed?.dated?`<div class="row" style="align-items:flex-end;gap:14px">${spark(p.speed.weeks)}<span class="small muted">${p.speed.per90} sold in 90 days · ${speedText(p.speed)}${p.speed.trend==='up'?' · picking up':p.speed.trend==='down'?' · slowing down':''}<br>Last sold ${esc(p.speed.last||'—')}</span></div>`:''}
+    ${p.part_numbers?.length?`<div class="stack" style="gap:4px"><span class="label">Known part numbers · check the label on the part</span>${p.part_numbers.map(x=>`<div class="row small" style="gap:8px"><span class="mono"><b>${esc(x.pn)}</b></span><span>${x.count} sold · ${money(x.low)}–${money(x.high)}</span><button class="linkbtn" data-act="pninfo" data-pn="${esc(x.pn)}">What else it fits</button></div>${S.pnInfo?.[x.pn]?`<div class="small muted" style="padding-left:8px">${S.pnInfo[x.pn].fits.length?S.pnInfo[x.pn].fits.map(f=>`${esc(f.make)} ${esc(f.model)} ${f.year_from??''}${f.year_to&&f.year_to!==f.year_from?'–'+f.year_to:''} (${f.seen} seen)`).join(' · '):'Only seen on this model so far.'}</div>`:''}`).join('')}</div>`:''}
     ${p.sample_titles?.length?`<div class="small muted">Example listings: ${p.sample_titles.map(t=>`<div>“${esc(t)}”</div>`).join('')}</div>`:''}
     <div class="row small"><a href="${esc(soldUrl(v,p.words||p.name))}" target="_blank" rel="noopener">eBay sold ↗</a><a href="${esc(tpUrl(v,p.words||p.name))}" target="_blank" rel="noopener">Terapeak ↗</a><span class="muted">${esc(CATNAME[p.cat]||'Other')}</span>${p.reason==='never_pull'?`<button class="linkbtn" data-act="neverpull" data-k="${esc(p.key)}" data-on="0">Allow pulling again</button>`:`<button class="linkbtn" data-act="neverpull" data-k="${esc(p.key)}" data-on="1" style="color:var(--bad)">Never pull this part</button>`}</div>
     <form class="stack" data-form="pulled" data-k="${esc(p.key)}"><span class="label">Pulled it? Grade it and shelve it</span>
@@ -337,7 +362,8 @@ function researchPanel(){
   ${pv?`<div class="panel"><div class="panel-h"><h2>Found ${pv.sales} sales</h2><span class="small muted">Read ${pv.read} listings · left out ${pv.excluded.junk} junk/aftermarket/new, ${pv.excluded.other_vehicle} other vehicles${pv.excluded.airbag_or_unknown?`, ${pv.excluded.airbag_or_unknown} airbags/unclear`:''}</span></div>
    <div class="panel-b">${chips({large:true})}</div><div class="panel-b"><h3>Small parts · used for pull sheets</h3></div>${salesTable(pv.small,false)}
    <div class="panel-b"><h3>Large parts · saved for later</h3></div>${salesTable(pv.big,true)}
-   ${pv.sales?`<div class="panel-b stack"><div class="label">3 · Save for these years</div><p class="small muted">Most parts fit a range of years. Save once for the whole generation.</p>
+   ${pv.sales?`<div class="panel-b stack"><div class="label">3 · Save for these years</div><p class="small muted">${R.gen?`Filled in from this model's generation (${R.gen.year_from}–${R.gen.year_to}). Sales whose title names other years (e.g. "2005-2007") only count for those years.`:'Most parts fit a range of years. Save once for the whole generation.'}</p>
+    ${R.gen?.sisters?.length?`<label class="small" style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="usesis" ${R.useSisters?'checked':''}> Also use these sales for ${esc(R.gen.sisters.map(x=>`${x.make} ${x.model} ${x.year_from}–${x.year_to}`).join(', '))}</label>`:''}
     <div class="row"><input class="inp" style="width:100px" id="yfrom" inputmode="numeric" value="${esc(R.yFrom)}"><span>to</span><input class="inp" style="width:100px" id="yto" inputmode="numeric" value="${esc(R.yTo)}"><button class="btn good" data-act="savepaste" ${S.busy.save?'disabled':''}>${S.busy.save?'<span class="spinner"></span> Saving…':'Save research'}</button></div></div>`
    :`<p class="panel-b muted">Nothing usable found. Check that you copied the sold results page for this model.</p>`}</div>`:''}
   <div class="panel"><div class="panel-h"><h2>Saved for ${esc(v.make)} ${esc(v.model)}</h2>${ms?`<span class="small muted">${Math.round(ms.total_sales).toLocaleString()} sales${ms.years?` · ${ms.years[0]}–${ms.years[1]}`:''}</span>`:''}</div>
@@ -372,7 +398,7 @@ function vData(){
    <select class="inp" id="dq-make" style="width:auto"><option value="">All makes</option>${(S.dataMakes||D?.makes||[]).map(m=>`<option ${Q.make===m?'selected':''}>${esc(m)}</option>`).join('')}</select>
    <label class="chk small" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="dq-sold" ${Q.sold_only?'checked':''}> Sold data only</label>
   </div>
-  <div class="seg" role="group" aria-label="Part size"><button data-act="dtab" data-t="small" aria-pressed="${Q.tab==='small'}">Small parts</button><button data-act="dtab" data-t="large" aria-pressed="${Q.tab==='large'}">Large parts</button><button data-act="dtab" data-t="models" aria-pressed="${Q.tab==='models'}">Models</button></div>`;
+  <div class="seg" role="group" aria-label="Part size"><button data-act="dtab" data-t="small" aria-pressed="${Q.tab==='small'}">Small parts</button><button data-act="dtab" data-t="large" aria-pressed="${Q.tab==='large'}">Large parts</button><button data-act="dtab" data-t="models" aria-pressed="${Q.tab==='models'}">Models</button><button data-act="dtab" data-t="fastest" aria-pressed="${Q.tab==='fastest'}">Fastest sellers</button></div>`;
   if(!D) return head+`<div class="panel empty"><span class="spinner"></span><p class="muted">Adding it up…</p></div>`;
   const t=today();
   const kpis=`<div class="kpis"><div class="kpi"><span class="label">In today</span><b>${S.cars.filter(c=>chicagoDay(c.scanned_at)===t).length}</b></div><div class="kpi"><span class="label">Waiting</span><b>${S.cars.filter(c=>c.status==='queued').length}</b></div><div class="kpi"><span class="label">eBay lookups today</span><b>${(st.calls_today??0).toLocaleString()}</b><span class="small muted">of ${(st.call_cap||4800).toLocaleString()}</span></div></div>`;
@@ -380,6 +406,11 @@ function vData(){
   if(Q.tab==='small'){
     const rows=D.parts.filter(p=>catOk(p.cat));
     body=chips()+`<div class="panel"><div class="panel-h"><h2>Top part types</h2><span class="small muted">across ${D.cars} cars</span></div><div style="overflow-x:auto"><table class="pt"><thead><tr><th>Part</th><th>Type</th><th>Cars</th><th>Avg clean</th><th>Total</th><th>Sold data</th></tr></thead><tbody>${rows.slice(0,60).map(p=>`<tr><td>${esc(p.name)}${p.discovered?' <span class="chip steady" style="font-size:.7rem">found</span>':''}</td><td class="small muted">${esc(CATNAME[p.cat]||'Other')}</td><td class="mono">${p.cars}</td><td class="mono">${money(p.avg)}</td><td class="mono"><b>${money(p.total)}</b></td><td class="small">${p.sold_share>=.5?'Sold':'Asking'}</td></tr>`).join('')||'<tr><td colspan="6" class="muted">Nothing in this filter yet.</td></tr>'}</tbody></table></div></div>`;
+  } else if(Q.tab==='fastest'){
+    const F=S.fastest;
+    if(!F){ body=`<div class="panel empty"><span class="spinner"></span></div>`; }
+    else { const rows=F.parts.filter(p=>catOk(p.cat));
+      body=chips()+`<div class="panel"><div class="panel-h"><h2>Fastest sellers</h2><span class="small muted">From sold dates in your Research pastes · last 90 days · all models</span></div><div style="overflow-x:auto"><table class="pt"><thead><tr><th>Part</th><th>Sold 90d</th><th>Sells every</th><th>Trend</th><th>Typical</th><th>Clean</th><th>Models</th></tr></thead><tbody>${rows.map(p=>`<tr><td>${esc(p.name)}</td><td class="mono">${p.per90}</td><td class="mono">${p.every_days!=null?p.every_days+' d':'—'}</td><td>${p.trend==='up'?'↑ picking up':p.trend==='down'?'↓ slowing':'—'}</td><td class="mono">${money(p.median)}</td><td class="mono"><b>${money(p.high)}</b></td><td class="mono">${p.models}</td></tr>`).join('')||'<tr><td colspan="7" class="muted">No dated sales yet. Paste eBay sold pages in Research (Terapeak totals have no dates).</td></tr>'}</tbody></table></div></div>`; }
   } else if(Q.tab==='large'){
     body=`<div class="panel"><div class="panel-h"><h2>Large parts sold</h2><span class="small muted">From your Research pastes for these models · never added to car totals</span></div>${D.large.length?salesTable(D.large,true,true):'<p class="panel-b muted">No large-part sales saved yet. They come from Research pastes.</p>'}</div>`;
   } else {
@@ -447,7 +478,7 @@ async function gatherLoop(){
   S.gather.running=false; draw();
 }
 async function openCar(id){
-  S.tab='car'; S.carData=null; S.large=null; S.notCounted=false; S.open={}; S.showHidden=false; S.research=null; draw(); window.scrollTo({top:0});
+  S.tab='car'; S.carData=null; S.large=null; S.notCounted=false; S.genEdit=null; S.open={}; S.showHidden=false; S.research=null; draw(); window.scrollTo({top:0});
   try{ S.carData=await fn({action:'car',id}); if(S.carData.error) throw new Error(S.carData.error); }catch(e){ S.err=e.message; S.tab='checkin'; }
   draw();
 }
@@ -480,7 +511,8 @@ async function addToShelf(key,form){
   toast('Could not save');
 }
 function startResearch(vehicle,from){
-  S.research={vehicle:{year:vehicle.year,make:vehicle.make,model:vehicle.model},text:'',preview:null,saved:null,src:'ebay',from,yFrom:vehicle.year,yTo:vehicle.year};
+  S.research={vehicle:{year:vehicle.year,make:vehicle.make,model:vehicle.model},text:'',preview:null,saved:null,src:'ebay',from,yFrom:vehicle.year,yTo:vehicle.year,gen:null,useSisters:true};
+  fn({action:'generation',vehicle:S.research.vehicle}).then(r=>{ if(!S.research) return; S.research.gen=r.generation; if(r.generation){ S.research.yFrom=r.generation.year_from; S.research.yTo=r.generation.year_to; } draw(); }).catch(()=>{});
   if(from!=='car') S.tab='research';
   draw(); window.scrollTo({top:0});
 }
@@ -500,7 +532,7 @@ async function savePaste(){
   S.busy.save=true; draw();
   try{
     const src=SOURCES.find(x=>x[0]===R.src)||SOURCES[0];
-    const r=await fn({action:'research_save',text:R.text,vehicle:R.vehicle,year_from:yf,year_to:yt,period_days:src[2]});
+    const r=await fn({action:'research_save',text:R.text,vehicle:R.vehicle,year_from:yf,year_to:yt,period_days:src[2],sisters:R.useSisters&&R.gen?.sisters?R.gen.sisters:[]});
     toast(src[2]?`Saved Terapeak totals for ${r.saved} listing${r.saved===1?'':'s'} (${yf===yt?yf:yf+'–'+yt})`:`Saved ${r.saved} new sale${r.saved===1?'':'s'}${r.already_saved?` (${r.already_saved} were already saved)`:''} for ${yf===yt?yf:yf+'–'+yt}`);
     const back=R.from; S.research=null; await Promise.all([loadCars(),loadPlatforms()]);
     if(back==='car'&&S.carData){ await openCar(S.carData.vehicle.id); }
@@ -644,7 +676,11 @@ document.addEventListener('click',e=>{
   else if(a==='merge') setMerge(t.dataset.from,t.dataset.to,'merge');
   else if(a==='distinct') setMerge(t.dataset.from,t.dataset.to,'distinct');
   else if(a==='notcounted'){ S.notCounted=!S.notCounted; draw(); if(S.notCounted&&!S.large) loadLarge(); }
-  else if(a==='dtab'){ S.dataQ.tab=t.dataset.t; draw(); }
+  else if(a==='dtab'){ S.dataQ.tab=t.dataset.t; draw(); if(t.dataset.t==='fastest') fn({action:'fastest'}).then(r=>{S.fastest=r;draw();}).catch(e=>toast(e.message)); }
+  else if(a==='pninfo'){ const pn=t.dataset.pn; fn({action:'part_number',part_number:pn}).then(r=>{ S.pnInfo={...(S.pnInfo||{}),[pn]:r}; draw(); }).catch(e=>toast(e.message)); }
+  else if(a==='lookupgen'){ const v=S.carData.vehicle; toast('Looking up generations…'); fn({action:'lookup_generation',make:v.make,model:v.model}).then(r=>{ toast(r.error?r.error:'Generation found'); return openCar(v.id); }).catch(e=>toast(e.message)); }
+  else if(a==='editgen'){ const d=S.carData, g=d.generation, v=d.vehicle; S.genEdit={vehicle:{make:v.make,model:v.model,year:v.year},id:g?.id,year_from:g?.year_from??v.year,year_to:g?.year_to??v.year,sisters:(g?.sisters||[]).map(x=>`${x.make} ${x.model} ${x.year_from}-${x.year_to}`).join('\n')}; draw(); }
+  else if(a==='canceledit'){ S.genEdit=null; draw(); }
   else if(a==='backup') downloadBackup();
   else if(a==='cleanup') cleanup();
   else if(a==='runnow'){ S.gather.running=false; fn({action:'process'}).then(r=>{ S.gather.info=r; toast(`Gathered ${r.models_done} model${r.models_done===1?'':'s'} · ${r.cars_waiting} cars still waiting`); return Promise.all([loadCars(),fn({action:'status'}).then(s=>S.status=s)]); }).catch(e=>toast(e.message)).finally(draw); }
@@ -657,6 +693,7 @@ document.addEventListener('input',e=>{
   if(t.id==='yto'&&S.research) S.research.yTo=t.value;
   if(t.id==='psrc'&&S.research) S.research.src=t.value;
   if(t.id==='shelfq'){ S.shelfQ=t.value; draw(); }
+  if(t.id==='usesis'&&S.research) S.research.useSisters=t.checked;
 });
 document.addEventListener('submit',async e=>{
   e.preventDefault(); const f=e.target;
@@ -672,6 +709,10 @@ document.addEventListener('submit',async e=>{
   if(f.dataset.form==='item') updateItem(f.dataset.id,e.submitter?.value||'listed',f);
   if(f.dataset.form==='cutoff') saveCutoff(f);
   if(f.dataset.form==='role') setRole(f);
+  if(f.dataset.form==='gen'){
+    const E=S.genEdit; const sisters=f.sis.value.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{ const m=l.match(/^(\S+)\s+(.+?)(?:\s+(\d{4})\s*[-–]\s*(\d{4}))?$/); return m?{make:m[1],model:m[2],year_from:m[3]?+m[3]:undefined,year_to:m[4]?+m[4]:undefined}:null; }).filter(Boolean);
+    fn({action:'save_generation',vehicle:E.vehicle,id:E.id,year_from:+f.yf.value,year_to:+f.yt.value,sisters}).then(r=>{ if(r.error){ toast(r.error); return; } toast('Generation saved'); S.genEdit=null; return openCar(S.carData.vehicle.id); }).catch(e=>toast(e.message));
+  }
 });
 document.addEventListener('change',e=>{
   const t=e.target;

@@ -271,6 +271,45 @@ export function aggregate(listings: Listing[], v: { make?: string; model?: strin
   return { groups: out, excluded };
 }
 
+// ---------- OEM part numbers and fitment years from listing titles ----------
+const PN_RULES: RegExp[] = [
+  /\b[A-Z0-9]{4}-[A-Z0-9]{4,6}-[A-Z]{1,3}\b/g,        // Ford/Lincoln: BL3T-19980-AC
+  /\b\d{5}-[A-Z0-9]{3}-[A-Z0-9]{3,4}\b/g,             // Honda/Acura: 33151-SDA-A01
+  /\b[A-Z0-9]{4}-\d{2}-[A-Z0-9]{3,5}\b/g,             // Mazda: GS1D-67-560
+  /\b[0-9][0-9A-Z]{4}-[0-9A-Z]{5}\b/g,                // Toyota, Nissan, Hyundai, Kia: 89661-06K30, 284B1-1AA0A, 96560-2S000
+  /\bP?\d{8}[A-Z]{2}\b/g,                             // Chrysler/Dodge/Jeep/Ram: 68100539AB, P04692154AE
+  /\b\d{5}[A-Z]{2}\d{3}\b/g,                          // Subaru: 88281FG000
+  /\b\d[A-Z]\d ?\d{3} ?\d{3} ?[A-Z]{0,2}\b/g,         // VW/Audi: 1K0 937 049 N
+  /\bA ?\d{3} ?\d{3} ?\d{2} ?\d{2}\b/g,               // Mercedes: A 204 900 59 03
+];
+const GM_PN = /\b(?:1[0-9]|2[0-9]|8[0-9]|9[0-9])\d{6}\b/g; // GM: 20983440 (8 digits)
+export function partNumbers(title: string, make = ""): string[] {
+  const t = " " + String(title).toUpperCase() + " ";
+  const out = new Set<string>();
+  for (const re of PN_RULES) for (const m of t.matchAll(re)) {
+    const pn = m[0].replace(/\s+/g, "");
+    if (/^(19|20)\d{2}-/.test(pn) && pn.length < 10) continue;
+    out.add(pn);
+  }
+  for (const m of t.matchAll(GM_PN)) {
+    const n = m[0];
+    if (/^(19|20)\d{2}(19|20)\d{2}$/.test(n)) continue; // "20102015" is a year range, not a part number
+    out.add(n);
+  }
+  if (/bmw|mini/i.test(make)) for (const m of t.matchAll(/\b\d{7}\b/g)) out.add(m[0]);
+  return [...out].slice(0, 6);
+}
+export function titleYears(title: string): [number, number] | null {
+  const t = String(title);
+  let m = t.match(/\b((?:19|20)\d{2})\s*[-–\/]\s*((?:19|20)?\d{2})\b/);
+  if (m) { const a = +m[1], b = m[2].length === 2 ? Math.floor(a / 100) * 100 + +m[2] : +m[2]; if (b >= a && b - a <= 15) return [a, b]; }
+  m = t.match(/\b(0\d|1\d|2\d|9\d)\s*[-–]\s*(0\d|1\d|2\d|9\d)\b/);
+  if (m) { const y = (x: string) => (+x >= 80 ? 1900 : 2000) + +x; const a = y(m[1]), b = y(m[2]); if (b >= a && b - a <= 15) return [a, b]; }
+  const ys = [...t.matchAll(/\b(19[89]\d|20[0-3]\d)\b/g)].map((x) => +x[1]);
+  if (ys.length) return [Math.min(...ys), Math.max(...ys)];
+  return null;
+}
+
 // ---------- Reading a pasted eBay "Sold" page or Terapeak results ----------
 const BOILER = /^(opens in a new window or tab|pre-owned|brand new|open box|used|parts only|located in|buy it now|or best offer|best offer accepted|free (shipping|delivery|returns|local pickup)|sponsored|shop on ebay|view similar|sell one like this|watch|top rated|last one|new listing|sold item|authenticity|see price|more like this|save this search|filter|sort|shipping to|delivery to|items? found|results? for|\d+ (sold|watchers?|bids?)|\d+\+? results|shipping|returns accepted|or buy it now|\(\d+\)|best match|.{0,3})$/i;
 const PRICE = /^\$\s?([\d,]+(?:\.\d{2})?)(?:\s+to\s+\$[\d,.]+)?$/;
@@ -332,7 +371,7 @@ export function platformKey(v: { year?: unknown; make?: unknown; model?: unknown
   const n = (s: unknown) => String(s ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   return [n(v.make), n(v.model), n(v.year)].join("|");
 }
-const titleCase = (s: string) => s.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase());
+const titleCase = (s: string) => { const u = String(s).toUpperCase(); if (["GMC", "BMW", "RAM", "MINI", "FIAT", "VW"].includes(u)) return u === "MINI" ? "MINI" : u === "FIAT" ? "FIAT" : u; return String(s).toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase()); };
 const nowIso = () => new Date().toISOString();
 const daysOld = (t?: string | null) => (t ? (Date.now() - new Date(t).getTime()) / 864e5 : Infinity);
 
@@ -703,7 +742,25 @@ async function processQueue(budgetMs: number) {
       finally { await addCalls(callCount - before); }
     }
   }
-  // 4. weekly backup into Supabase Storage
+  // 4. look up generations for models we haven't checked yet (needs ANTHROPIC_API_KEY)
+  if (env("ANTHROPIC_API_KEY") && Date.now() - t0 < budgetMs) {
+    const cars = (await rest("GET", "pm_vehicles?platform=neq.&select=make,model&order=scanned_at.desc&limit=2000")) || [];
+    const done = new Set(((await rest("GET", "pm_model_lookups?select=model_key,status,tried_at&limit=5000")) || []).filter((l: any) => l.status === "ok" || daysOld(l.tried_at) < 7).map((l: any) => l.model_key));
+    const todo: any[] = [];
+    for (const c of cars) { const k = modelKey(c); if (!done.has(k) && !todo.find((t) => modelKey(t) === k)) todo.push(c); }
+    for (const c of todo.slice(0, 3)) { if (Date.now() - t0 > budgetMs) break; const r = await lookupGenerations(c.make, c.model); if ((r as any).error === "anthropic_key_missing") break; }
+  }
+  // 5. older saved sales get their part numbers read once
+  if (Date.now() - t0 < budgetMs) {
+    const old = (await rest("GET", "pm_sales?part_numbers=is.null&select=id,title,make,model,part_key,part_name,price,year_from,year_to&limit=500")) || [];
+    for (const r of old) {
+      const fy = titleYears(r.title);
+      r.part_numbers = partNumbers(r.title, r.make); r.fit_from = fy?.[0] ?? null; r.fit_to = fy?.[1] ?? null;
+      await rest("PATCH", `pm_sales?id=eq.${r.id}`, { part_numbers: r.part_numbers, fit_from: r.fit_from, fit_to: r.fit_to }, "return=minimal");
+    }
+    if (old.length) await addInterchangeFromSales(old);
+  }
+  // 6. weekly backup into Supabase Storage
   try { const s = await settings(); if (daysOld(s.last_backup_at) >= 7) await storeBackup(); } catch (e) { notes.add("backup_failed: " + (e as Error).message); }
   await rest("PATCH", "pm_settings?id=eq.1", { last_process_at: nowIso() }, "return=minimal");
   const left = (await rest("GET", "pm_vehicles?status=eq.queued&select=platform")) || [];
@@ -735,7 +792,23 @@ async function platformData(platform: string) {
     if (ruled.has([A.key, B.key].sort().join("~"))) continue;
     if (similar(A.name, B.name) >= 0.5) suggestions.push(A.discovered ? { a: A.key, b: B.key } : { a: B.key, b: A.key });
   }
-  return { platform, model_key: mk, platform_info: plat?.[0] || null, parts, part_min: cfg.part_min, never_pull: cfg.never_pull, duplicate_suggestions: suggestions.slice(0, 10) };
+  // Generation, sales speed and known part numbers (from your saved sales)
+  const [make, model, yr] = [plat?.[0]?.make, plat?.[0]?.model, Number(platform.split("|")[2])];
+  let gen: any = null, sales: any[] = [];
+  if (make && model) {
+    gen = await generationFor({ make, model, year: yr });
+    sales = await salesForPlatform({ make, model }, yr);
+  }
+  const byPart = new Map<string, any[]>();
+  for (const r of sales) { const k = r.part_key; for (const kk of /_x$/.test(k) ? [k.replace(/_x$/, "_l"), k.replace(/_x$/, "_r")] : [k]) byPart.set(kk, [...(byPart.get(kk) || []), r]); }
+  for (const p of parts) {
+    const rows = byPart.get(p.key) || [];
+    if (rows.length) p.speed = speedFrom(rows);
+    const pnMap = new Map<string, number[]>();
+    for (const r of rows) for (const pn of r.part_numbers || []) pnMap.set(pn, [...(pnMap.get(pn) || []), Number(r.price)]);
+    if (pnMap.size) p.part_numbers = [...pnMap.entries()].map(([pn, pr]) => ({ pn, count: pr.length, ...(priceStats(pr) || {}) })).sort((a, b) => b.count - a.count).slice(0, 5);
+  }
+  return { platform, model_key: mk, platform_info: plat?.[0] || null, parts, part_min: cfg.part_min, never_pull: cfg.never_pull, duplicate_suggestions: suggestions.slice(0, 10), generation: gen?.generation || null, generation_lookup: gen?.lookup || null };
 }
 
 // ---------- Every sale you paste is kept: small parts feed pull sheets, large parts are saved for later ----------
@@ -825,7 +898,10 @@ async function researchPreview(text: string, v: any) {
 async function rebuildPlatformFromSales(v: any, year: number) {
   const mk = modelKey(v);
   const since = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10);
-  const rows = (await rest("GET", `pm_sales?model_key=eq.${enc(mk)}&size=eq.small&year_from=lte.${year}&year_to=gte.${year}&or=(sold_on.gte.${since},sold_on.is.null)&select=part_key,part_name,title,price,qty,period_days,sold_on,pasted_at&limit=20000`)) || [];
+  const keys = [mk, ...(await sisterKeys(v, year))];
+  const rows = (await rest("GET", `pm_sales?model_key=${inList(keys)}&size=eq.small&year_from=lte.${year}&year_to=gte.${year}&or=(sold_on.gte.${since},sold_on.is.null)&select=part_key,part_name,title,price,qty,period_days,sold_on,pasted_at,fit_from,fit_to&limit=20000`)) || [];
+  // A title that says "2005-2007" doesn't fit a 2010: skip sales whose own years exclude this one
+  for (let i = rows.length - 1; i >= 0; i--) { const r = rows[i]; if (r.fit_from && r.fit_to && (year < r.fit_from || year > r.fit_to)) rows.splice(i, 1); }
   const now = Date.now();
   const recent = (r: any, days: number) => now - new Date(r.sold_on || r.pasted_at).getTime() <= days * 864e5;
   const perKey = new Map<string, any[]>();
@@ -858,7 +934,12 @@ async function rebuildPlatformFromSales(v: any, year: number) {
   return platform;
 }
 
-async function researchSave(text: string, v: any, yearFrom: number, yearTo: number, periodDays: number | null, who: any) {
+async function addInterchangeFromSales(rows: any[]) {
+  const ic: any[] = [];
+  for (const r of rows) for (const pn of r.part_numbers || []) ic.push({ part_number: pn, part_key: r.part_key, part_name: r.part_name, make: r.make, model: r.model, year_from: r.fit_from ?? r.year_from, year_to: r.fit_to ?? r.year_to, source: "sold-title", ref: String(r.id), price: r.price });
+  for (let i = 0; i < ic.length; i += 500) await rest("POST", "pm_interchange?on_conflict=part_number,source,ref", ic.slice(i, i + 500), "resolution=ignore-duplicates,return=minimal");
+}
+async function researchSave(text: string, v: any, yearFrom: number, yearTo: number, periodDays: number | null, who: any, sisters: any[] = []) {
   const r = readPaste(text, v);
   const y1 = Math.min(yearFrom, yearTo), y2 = Math.max(yearFrom, yearTo);
   const mk = modelKey(v);
@@ -867,6 +948,7 @@ async function researchSave(text: string, v: any, yearFrom: number, yearTo: numb
     model_key: mk, make: v.make, model: v.model, year_from: y1, year_to: y2,
     title: s.title, price: s.price, qty: s.qty || 1, period_days: tp ? periodDays : null, sold_on: s.date || null, ship: s.ship ?? null,
     part_key: s.type.key, part_name: s.type.name, size: s.type.size, source: tp ? "terapeak" : "ebay-sold",
+    part_numbers: partNumbers(s.title, v.make), fit_from: titleYears(s.title)?.[0] ?? null, fit_to: titleYears(s.title)?.[1] ?? null,
     // eBay rows are single sales: same title+price+date = same sale. Terapeak rows are running totals: the newest paste wins.
     dedupe_key: tp ? `${mk}|tp|${s.title.toLowerCase()}` : `${mk}|${s.title.toLowerCase()}|${s.price}|${s.date || ""}`,
     ...(who?.id && who.id !== "cron" ? { pasted_by: who.id } : {}),
@@ -876,10 +958,16 @@ async function researchSave(text: string, v: any, yearFrom: number, yearTo: numb
     const chunk = rows.slice(i, i + 500);
     const res = await rest("POST", "pm_sales?on_conflict=dedupe_key", chunk, tp ? "resolution=merge-duplicates,return=representation" : "resolution=ignore-duplicates,return=representation");
     added += (res || []).length;
+    await addInterchangeFromSales(res || []);
   }
   const { part_min } = await settings();
   const years: number[] = [];
   for (let y = y1; y <= y2 && years.length < 15; y++) { const p = await rebuildPlatformFromSales(v, y); await finalizePlatform(p, part_min); years.push(y); }
+  // Sister models (e.g. GMC Terrain for an Equinox) share these parts: rebuild their years too
+  for (const sis of (Array.isArray(sisters) ? sisters : [])) {
+    const sv = { make: sis.make, model: sis.model };
+    for (let y = Math.max(y1, sis.year_from ?? y1); y <= Math.min(y2, sis.year_to ?? y2); y++) { const p = await rebuildPlatformFromSales(sv, y); await finalizePlatform(p, part_min); }
+  }
   const groups = summarize(r.sales);
   return { read: r.read, excluded: r.excluded, saved: added, already_saved: rows.length - added, saved_years: years,
     small: groups.filter((g) => g.size === "small").length, big: groups.filter((g) => g.size === "big").length };
@@ -961,7 +1049,7 @@ async function dataSummary(body: any) {
   };
 }
 // ---------- Backups ----------
-const BACKUP_TABLES = ["pm_vehicles", "pm_platforms", "pm_part_stats", "pm_sales", "pm_items", "pm_settings", "pm_people", "pm_merges", "pm_usage"];
+const BACKUP_TABLES = ["pm_vehicles", "pm_platforms", "pm_part_stats", "pm_sales", "pm_items", "pm_settings", "pm_people", "pm_merges", "pm_usage", "pm_generations", "pm_model_lookups", "pm_interchange"];
 async function dumpTable(t: string) {
   const out: any[] = [];
   for (let off = 0; off < 500000; off += 1000) {
@@ -988,6 +1076,148 @@ async function storeBackup() {
   if (!r.ok) throw new Error(`storage_${r.status}`);
   await rest("PATCH", "pm_settings?id=eq.1", { last_backup_at: nowIso() }, "return=minimal");
   return { stored: name, rows: Object.fromEntries(Object.entries(b.tables).map(([k, v]) => [k, v.length])) };
+}
+
+// ---------- Generations (Wikipedia + Claude) ----------
+const WIKI_UA = { "User-Agent": "QuickPull/1.0 (used auto parts yard tool)" };
+async function wikiText(make: string, model: string) {
+  const q = `${make} ${model}`;
+  const s = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${enc(q + " car")}&srlimit=5&format=json&origin=*`, { headers: WIKI_UA }).then((r) => r.json()).catch(() => null);
+  const hits = (s?.query?.search || []).map((h: any) => h.title as string);
+  const want = q.toLowerCase();
+  const title = hits.find((t: string) => t.toLowerCase() === want) || hits.find((t: string) => t.toLowerCase().includes(String(model).toLowerCase())) || hits[0];
+  if (!title) return null;
+  const e = await fetch(`https://en.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&redirects=1&titles=${enc(title)}&format=json&origin=*`, { headers: WIKI_UA }).then((r) => r.json()).catch(() => null);
+  const page: any = Object.values(e?.query?.pages || {})[0];
+  if (!page?.extract) return null;
+  return { title: page.title as string, url: `https://en.wikipedia.org/wiki/${enc(String(page.title).replace(/ /g, "_"))}`, text: String(page.extract).slice(0, 60000) };
+}
+export async function askClaude(prompt: string, maxTokens = 2000): Promise<string> {
+  const key = env("ANTHROPIC_API_KEY");
+  if (!key) throw new Error("anthropic_key_missing");
+  let lastErr = "";
+  for (const model of [env("CLAUDE_MODEL") || "claude-haiku-5-5", "claude-sonnet-5-5"]) {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      body: JSON.stringify({ model, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok) return (d.content || []).map((c: any) => c.text || "").join("");
+    lastErr = `anthropic_${r.status}: ${d?.error?.message || ""}`.slice(0, 200);
+    if (r.status !== 404 && r.status !== 400) break;
+  }
+  throw new Error(lastErr);
+}
+export const firstJson = (t: string) => { const a = t.indexOf("{"), b = t.lastIndexOf("}"); return a >= 0 && b > a ? JSON.parse(t.slice(a, b + 1)) : null; };
+async function lookupGenerations(make: string, model: string, force = false) {
+  const mk = modelKey({ make, model });
+  if (!force) {
+    const prev = (await rest("GET", `pm_model_lookups?model_key=eq.${enc(mk)}&select=*`))?.[0];
+    if (prev && (prev.status === "ok" || daysOld(prev.tried_at) < 7)) return { skipped: true };
+  }
+  const log = (status: string, error: string | null = null) => rest("POST", "pm_model_lookups?on_conflict=model_key", [{ model_key: mk, make, model, status, error, tried_at: nowIso() }], "resolution=merge-duplicates,return=minimal");
+  try {
+    const w = await wikiText(make, model);
+    if (!w) { await log("no_article"); return { error: "No Wikipedia article found." }; }
+    const out = await askClaude(`You help a used auto parts yard in the United States work out which model years of a vehicle share parts.
+Vehicle: ${make} ${model}
+Below is the Wikipedia article "${w.title}".
+List every generation sold in the US: US model years (not calendar production years), any mid-cycle refresh/facelift model years (lights, bumpers, radios often change then), and "sister" vehicles from other brands or names that share the same platform and many interchangeable parts in those years (badge-engineered twins, e.g. Chevrolet Equinox and GMC Terrain).
+Only include what the article supports. If unsure of a year, give your best estimate and lower the confidence.
+Reply with JSON only, no other text:
+{"generations":[{"name":"Second generation","year_from":2010,"year_to":2017,"refresh_years":[2016],"sisters":[{"make":"GMC","model":"Terrain","year_from":2010,"year_to":2017}],"notes":"short note"}],"confidence":"high|medium|low"}
+
+ARTICLE:
+${w.text}`, 2500);
+    const j = firstJson(out);
+    const gens = (j?.generations || []).filter((g: any) => Number(g.year_from) > 1950 && Number(g.year_to) >= Number(g.year_from));
+    if (!gens.length) { await log("failed", "No generations in the answer"); return { error: "Couldn't read generations from the article." }; }
+    await rest("DELETE", `pm_generations?model_key=eq.${enc(mk)}&edited=is.false`, undefined, "return=minimal");
+    const edited = ((await rest("GET", `pm_generations?model_key=eq.${enc(mk)}&select=year_from`)) || []).map((r: any) => r.year_from);
+    const rows = gens.filter((g: any) => !edited.includes(Number(g.year_from))).map((g: any) => ({
+      model_key: mk, make, model, gen_name: String(g.name || "").slice(0, 80), year_from: Number(g.year_from), year_to: Number(g.year_to),
+      refresh_years: (g.refresh_years || []).map(Number).filter((n: number) => n > 1950), sisters: (g.sisters || []).filter((x: any) => x?.make && x?.model).map((x: any) => ({ make: titleCase(String(x.make)), model: String(x.model), year_from: Number(x.year_from) || Number(g.year_from), year_to: Number(x.year_to) || Number(g.year_to) })),
+      notes: String(g.notes || "").slice(0, 300), source_url: w.url, confidence: String(j.confidence || "medium"),
+    }));
+    if (rows.length) await rest("POST", "pm_generations?on_conflict=model_key,year_from", rows, "resolution=merge-duplicates,return=minimal");
+    await log("ok");
+    return { generations: rows.length, source: w.url };
+  } catch (e) { await log("failed", (e as Error).message); return { error: (e as Error).message }; }
+}
+async function generationFor(v: any) {
+  const mk = modelKey(v), y = Number(v.year);
+  const g = (await rest("GET", `pm_generations?model_key=eq.${enc(mk)}&year_from=lte.${y}&year_to=gte.${y}&select=*&order=edited.desc&limit=1`))?.[0] || null;
+  const lookup = (await rest("GET", `pm_model_lookups?model_key=eq.${enc(mk)}&select=status,error,tried_at`))?.[0] || null;
+  return { generation: g, lookup };
+}
+// Models that share parts with this one in this year: its own sisters, plus any model that lists it as a sister
+async function sisterKeys(v: any, year: number): Promise<string[]> {
+  const me = modelKey(v);
+  const gens = (await rest("GET", `pm_generations?year_from=lte.${year}&year_to=gte.${year}&select=model_key,sisters&limit=5000`)) || [];
+  const out = new Set<string>();
+  const inYear = (s: any) => (s.year_from ?? 0) <= year && year <= (s.year_to ?? 9999);
+  for (const g of gens) {
+    const sis = (g.sisters || []).filter(inYear);
+    if (g.model_key === me) for (const s of sis) out.add(modelKey(s));
+    else if (sis.some((s: any) => modelKey(s) === me)) out.add(g.model_key);
+  }
+  out.delete(me);
+  return [...out];
+}
+async function saveGeneration(b: any) {
+  const mk = modelKey(b.vehicle || {}), yf = Number(b.year_from), yt = Number(b.year_to);
+  if (!(yf > 1950 && yt >= yf && yt - yf <= 25)) return { error: "Enter a valid year range." };
+  const sisters = (Array.isArray(b.sisters) ? b.sisters : []).filter((s: any) => s.make && s.model).map((s: any) => ({ make: String(s.make), model: String(s.model), year_from: Number(s.year_from) || yf, year_to: Number(s.year_to) || yt }));
+  if (b.id) await rest("PATCH", `pm_generations?id=eq.${Number(b.id)}`, { year_from: yf, year_to: yt, sisters, edited: true }, "return=minimal");
+  else await rest("POST", "pm_generations?on_conflict=model_key,year_from", [{ model_key: mk, make: b.vehicle.make, model: b.vehicle.model, gen_name: "Set by you", year_from: yf, year_to: yt, sisters, edited: true, confidence: "yours" }], "resolution=merge-duplicates,return=minimal");
+  return { ok: true };
+}
+
+// ---------- How fast parts sell, from saved sale dates ----------
+export function speedFrom(rows: any[], now = Date.now()) {
+  const weeks = Array(12).fill(0);
+  let n90 = 0, rate = 0, last: string | null = null;
+  for (const r of rows) {
+    const q = Number(r.qty || 1);
+    if (r.period_days) { rate += q * 90 / Number(r.period_days); continue; }
+    if (!r.sold_on) continue;
+    const age = (now - new Date(r.sold_on).getTime()) / 864e5;
+    if (age < 0) continue;
+    if (age <= 90) n90 += q;
+    const w = Math.floor(age / 7); if (w < 12) weeks[11 - w] += q;
+    if (!last || r.sold_on > last) last = String(r.sold_on).slice(0, 10);
+  }
+  const per90 = Math.max(n90, rate);
+  const recent = weeks.slice(8).reduce((a, b) => a + b, 0), before = weeks.slice(0, 8).reduce((a, b) => a + b, 0) / 2;
+  return {
+    per90: Math.round(per90 * 10) / 10, per_week: Math.round(per90 / 12.86 * 10) / 10, every_days: per90 > 0 ? Math.round(90 / per90 * 10) / 10 : null,
+    label: per90 >= 13 ? "fast" : per90 >= 3 ? "steady" : per90 > 0 ? "slow" : "unknown",
+    trend: recent > before * 1.3 && recent >= 2 ? "up" : before > recent * 1.3 && before >= 2 ? "down" : "flat", weeks, last, dated: n90 > 0,
+  };
+}
+async function salesForPlatform(v: any, year: number, size = "small") {
+  const keys = [modelKey(v), ...(await sisterKeys(v, year))];
+  const rows = (await rest("GET", `pm_sales?model_key=${inList(keys)}&size=eq.${size}&year_from=lte.${year}&year_to=gte.${year}&select=part_key,part_name,price,qty,period_days,sold_on,part_numbers,fit_from,fit_to,model_key&limit=20000`)) || [];
+  return rows.filter((r: any) => !(r.fit_from && r.fit_to && (year < r.fit_from || year > r.fit_to)));
+}
+async function fastestSellers(b: any) {
+  const since = new Date(Date.now() - 90 * 864e5).toISOString().slice(0, 10);
+  const rows = (await rest("GET", `pm_sales?size=eq.small&source=eq.ebay-sold&sold_on=gte.${since}&select=part_key,part_name,price,qty,sold_on,model_key&limit=50000`)) || [];
+  const g = new Map<string, any>();
+  for (const r of rows) {
+    const k = baseKey(r.part_key || "");
+    const x = g.get(k) || { key: k, name: String(r.part_name || k).replace(/, (driver|passenger)$/, ""), rows: [], prices: [], models: new Set() };
+    x.rows.push(r); x.prices.push(Number(r.price)); x.models.add(r.model_key); g.set(k, x);
+  }
+  const cfg = await settings();
+  return { parts: [...g.values()].filter((x) => !cfg.never_pull.includes(x.key)).map((x) => ({ key: x.key, name: x.name, cat: partCat(x.key, x.name), models: x.models.size, ...speedFrom(x.rows), ...(priceStats(x.prices) || {}) })).sort((a, b) => b.per90 - a.per90).slice(0, 80) };
+}
+async function partNumberInfo(pn: string) {
+  const rows = (await rest("GET", `pm_interchange?part_number=eq.${enc(pn.toUpperCase().replace(/\s+/g, ""))}&select=*&limit=500`)) || [];
+  const fits = new Map<string, any>();
+  for (const r of rows) { const k = `${r.make}|${r.model}`; const f = fits.get(k) || { make: r.make, model: r.model, year_from: r.year_from, year_to: r.year_to, seen: 0, sources: new Set() }; f.year_from = Math.min(f.year_from ?? r.year_from, r.year_from ?? f.year_from); f.year_to = Math.max(f.year_to ?? r.year_to, r.year_to ?? f.year_to); f.seen++; f.sources.add(r.source); fits.set(k, f); }
+  return { part_number: pn, fits: [...fits.values()].map((f) => ({ ...f, sources: [...f.sources] })), prices: priceStats(rows.map((r: any) => Number(r.price)).filter(Boolean)) };
 }
 
 async function recomputeAll() {
@@ -1020,7 +1250,12 @@ export async function handle(req: Request): Promise<Response> {
       case "car": return owner ? json(await carData(Number(body.id))) : ownerOnly();
       case "platform": return owner ? json(await platformData(String(body.platform || ""))) : ownerOnly();
       case "research_preview": return owner ? json(await researchPreview(String(body.text || ""), body.vehicle || {})) : ownerOnly();
-      case "research_save": return owner ? json(await researchSave(String(body.text || ""), body.vehicle || {}, Number(body.year_from), Number(body.year_to), Number(body.period_days) || null, who)) : ownerOnly();
+      case "research_save": return owner ? json(await researchSave(String(body.text || ""), body.vehicle || {}, Number(body.year_from), Number(body.year_to), Number(body.period_days) || null, who, body.sisters || [])) : ownerOnly();
+      case "generation": return owner ? json(await generationFor(body.vehicle || {})) : ownerOnly();
+      case "save_generation": return owner ? json(await saveGeneration(body)) : ownerOnly();
+      case "lookup_generation": return owner ? json(await lookupGenerations(String(body.make || ""), String(body.model || ""), true)) : ownerOnly();
+      case "fastest": return owner ? json(await fastestSellers(body)) : ownerOnly();
+      case "part_number": return owner ? json(await partNumberInfo(String(body.part_number || ""))) : ownerOnly();
       case "model_sales": return owner ? json(await modelSales(body.vehicle || {})) : ownerOnly();
       case "recompute": return owner ? json(await recomputeAll()) : ownerOnly();
       case "cleanup": return owner ? json(await cleanupDiscovered()) : ownerOnly();
