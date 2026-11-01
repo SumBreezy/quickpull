@@ -126,6 +126,14 @@ table.pt td:first-child{white-space:normal;min-width:160px}
 .sku{font-family:var(--f-mono);font-size:.78rem;color:var(--muted)}
 .list .item{color:inherit;font:inherit}
 textarea.inp{line-height:1.5}
+.thumbs{display:flex;gap:8px;flex-wrap:wrap}
+.thumb{position:relative;width:84px;height:84px;border-radius:8px;overflow:hidden;border:1px solid var(--line);background:var(--sunk)}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.thumb button{position:absolute;top:3px;right:3px;width:24px;height:24px;border-radius:999px;border:0;background:rgb(0 0 0/.6);color:#fff;font-size:14px;line-height:24px;cursor:pointer;padding:0}
+.addph{width:84px;height:84px;border:1.5px dashed var(--line);border-radius:8px;display:grid;place-items:center;text-align:center;font-size:.8rem;color:var(--muted);cursor:pointer}
+.addph input{display:none}
+.steps{counter-reset:st}.steps>.panel{counter-increment:st}.steps>.panel>.panel-h h2::before{content:counter(st) ". ";color:var(--muted)}
+.ai{background:var(--sunk);border-radius:10px;padding:10px 12px}
 </style>
 </head>
 <body>
@@ -208,7 +216,7 @@ const S = { user:null, role:null, tab:'checkin', err:'', busy:{}, status:null,
   vinText:'', lastAdd:null, day:'today', cars:[], gather:{running:false, info:null},
   car:null, carData:null, showHidden:false, open:{},
   research:null, // {vehicle, text, preview, from, to}
-  items:[], shelfFilter:'pulled', people:[], data:null, scanning:false, cats:[], dataQ:{days:30,make:'',model:'',sold_only:false,tab:'small'}, shelfQ:'', notCounted:false, large:null };
+  items:[], shelfFilter:'pulled', people:[], data:null, scanning:false, cats:[], dataQ:{days:30,make:'',model:'',sold_only:false,tab:'small'}, shelfQ:'', notCounted:false, large:null, sell:null, ebay:null };
 const isOwner = () => S.role==='owner';
 
 /* ===== Rendering ===== */
@@ -220,7 +228,7 @@ function draw(){
   const cur = S.tab==='car' ? 'checkin' : S.tab;
   tabs.innerHTML=list.map(([k,l,c])=>`<button data-act="tab" data-t="${k}" ${cur===k?'aria-current="page"':''}>${l}${c?`<span class="count">${c}</span>`:''}</button>`).join('');
   const ae=document.activeElement, fid=ae?.id, sel=fid&&ae.selectionStart!=null?[ae.selectionStart,ae.selectionEnd]:null;
-  const views={checkin:vCheckin, car:vCar, research:vResearch, shelf:vShelf, data:vData, settings:vSettings};
+  const views={checkin:vCheckin, car:vCar, research:vResearch, shelf:()=>S.sell?vSell():vShelf(), data:vData, settings:vSettings};
   $('#app').innerHTML = (S.err?`<div class="banner bad">${esc(S.err)}</div>`:'') + setupBanner() + (views[S.tab]||vCheckin)();
   if(fid){ const el=document.getElementById(fid); if(el){ el.focus({preventScroll:true}); if(sel&&el.setSelectionRange) try{ el.setSelectionRange(...sel);}catch{} } }
   if(S.scanning) attachCamera();
@@ -379,14 +387,64 @@ function vShelf(){
   <details class="panel"><summary class="panel-h" style="cursor:pointer"><h3>Bin guide</h3></summary><div class="panel-b small" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px">${Object.entries(BINS).map(([g,l])=>`<div><span class="stock">${l}</span> ${esc(g)}</div>`).join('')}</div></details>
   <div class="row between"><div class="seg" role="group" aria-label="Filter">${[['pulled','To list'],['listed','Listed'],['sold','Sold'],['all','All']].map(([k,l])=>`<button data-act="filter" data-f="${k}" aria-pressed="${f===k}">${l}</button>`).join('')}</div>
    <input class="inp" id="shelfq" style="max-width:240px" placeholder="Search SKU, part, stock #" value="${esc(S.shelfQ)}" autocomplete="off"></div>
-  ${items.length?`<div class="panel list">${items.map(i=>`<div class="item"><div><div style="font-weight:600">${esc(i.part_name)}${i.grade?` <span class="mono small">· ${esc(i.grade)}</span>`:''}</div><div class="sku">${esc(i.sku||'')}</div><div class="small muted">${i.shelf?`<span class="stock">${esc(i.shelf)}</span> `:''}${esc(i.stock_no||'')} · ${esc((([mk,md,yr])=>[yr,mk,md].join(' '))((i.platform||'').split('|')).replace(/-/g,' '))}</div></div>
+  ${items.length?`<div class="panel list">${items.map(i=>`<div class="item"><div><div style="font-weight:600">${esc(i.part_name)}${i.grade?` <span class="mono small">· ${esc(i.grade)}</span>`:''}</div><div class="sku">${esc(i.sku||'')}${i.part_numbers?.length?` · #${esc(i.part_numbers.join(', '))}`:''}${i.photos?.length?` · ${i.photos.length} photo${i.photos.length>1?'s':''}`:''}</div><div class="small muted">${i.shelf?`<span class="stock">${esc(i.shelf)}</span> `:''}${esc(i.stock_no||'')} · ${esc((([mk,md,yr])=>[yr,mk,md].join(' '))((i.platform||'').split('|')).replace(/-/g,' '))}</div></div>
    <span class="chip ${i.status}">${{pulled:'To list',listed:'Listed',sold:'Sold',scrapped:'Scrapped'}[i.status]||i.status}</span>
    <form class="row" style="grid-column:1/-1" data-form="item" data-id="${i.id}">
-    ${i.status==='pulled'?`<input class="inp" style="width:120px" id="lp-${i.id}" name="price" inputmode="decimal" placeholder="List price" value="${esc(i.list_price??'')}"><button class="btn sm" name="to" value="listed">Listed</button>`:''}
-    ${i.status==='listed'?`<span class="small muted">Listed ${money(i.list_price)} · ${ago(i.listed_at)}</span><input class="inp" style="width:120px" id="sp-${i.id}" name="price" inputmode="decimal" placeholder="Sold for" value="${esc(i.list_price??'')}"><button class="btn sm good" name="to" value="sold">Sold</button>`:''}
-    ${i.status==='sold'?`<span class="small muted">Sold ${money(i.sold_price)} · ${ago(i.sold_at)}</span>`:''}
+    ${i.status==='pulled'?`<button type="button" class="btn sm" data-act="sell" data-id="${i.id}">${i.photos?.length?'Continue listing':'Photos & list on eBay'}</button><input class="inp" style="width:110px" id="lp-${i.id}" name="price" inputmode="decimal" placeholder="List price" value="${esc(i.list_price??'')}"><button class="btn sm ghost" name="to" value="listed">Listed elsewhere</button>${i.listing_error?`<span class="small" style="color:var(--bad);flex-basis:100%">Last try: ${esc(i.listing_error)}</span>`:''}`:''}
+    ${i.status==='listed'?`<span class="small muted">Listed ${money(i.list_price)} · ${ago(i.listed_at)}</span>${i.ebay_listing_id?`<a class="small" href="https://www.ebay.com/itm/${esc(i.ebay_listing_id)}" target="_blank" rel="noopener">On eBay ↗</a><button type="button" class="linkbtn small" data-act="sell" data-id="${i.id}">Edit</button>`:''}<input class="inp" style="width:120px" id="sp-${i.id}" name="price" inputmode="decimal" placeholder="Sold for" value="${esc(i.list_price??'')}"><button class="btn sm good" name="to" value="sold">Sold</button>`:''}
+    ${i.status==='sold'?`<span class="small muted">Sold ${money(i.sold_price)} · ${ago(i.sold_at)}${i.channel==='ebay'&&i.ebay_listing_id?' on eBay':''}</span>`:''}
     ${i.status!=='sold'&&i.status!=='scrapped'?`<button class="linkbtn small" name="to" value="scrapped" style="margin-left:auto">Scrap</button>`:''}
    </form></div>`).join('')}</div>`:`<div class="panel empty"><p class="muted">Nothing here yet. Open a car and tap “Add to shelf” on a part.</p></div>`}`;
+}
+
+/* ---- Sell one part: photos → AI read → listing → publish ---- */
+function vSell(){
+  const X=S.sell, i=S.items.find(x=>x.id===X.id); if(!i){ S.sell=null; return vShelf(); }
+  const ph=i.photos||[], eb=S.ebay, D=X.draft, ai=X.ai;
+  const ready=eb?.connected&&eb.fulfillment_policy_id&&eb.payment_policy_id&&eb.return_policy_id&&eb.location;
+  const fitTxt=D?(D.fitText??D.fit.map(f=>`${f.year_from}${f.year_to!==f.year_from?'-'+f.year_to:''} ${f.make} ${f.model}`).join('\n')):'';
+  const aspTxt=D?(D.aspText??Object.entries(D.aspects||{}).map(([k,v])=>`${k}: ${v.join(', ')}`).join('\n')):'';
+  const missing=D?(D.aspect_hints||[]).filter(a=>a.required&&!new RegExp('^'+a.name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\s*:\\s*\\S','mi').test(aspTxt)):[];
+  return `<button class="linkbtn" data-act="closesell">← Shelf</button>
+  <div class="stack" style="gap:4px"><h1>${esc(i.part_name)}</h1><div class="sku">${esc(i.sku||'')} · ${esc((([mk,md,yr])=>[yr,mk,md].join(' '))((i.platform||'').split('|')).replace(/-/g,' '))}${i.grade?` · grade ${esc(i.grade)}`:''}</div></div>
+  ${i.status==='listed'&&i.ebay_listing_id?`<div class="banner">Listed on eBay. <a href="https://www.ebay.com/itm/${esc(i.ebay_listing_id)}" target="_blank" rel="noopener">Open listing ↗</a> Changes below update the same listing.</div>`:''}
+  <div class="steps stack">
+  <div class="panel"><div class="panel-h"><h2>Photos</h2><span class="small muted">${ph.length}/12</span></div><div class="panel-b stack">
+   <p class="small muted">Take the label with the part number up close, then every side. Plain background, good light. eBay shows the first photo in search.</p>
+   <div class="thumbs">${ph.map((p,n)=>`<div class="thumb"><img src="${esc(p.url)}" alt="Photo ${n+1}" loading="lazy"><button data-act="delphoto" data-n="${n}" aria-label="Remove photo ${n+1}">×</button></div>`).join('')}
+    ${ph.length<12?`<label class="addph">${S.busy.upload?'<span class="spinner"></span>':'+ Add<br>photos'}<input type="file" id="photoin" accept="image/*" multiple ${S.busy.upload?'disabled':''}></label>`:''}</div></div></div>
+
+  <div class="panel"><div class="panel-h"><h2>Part number & condition</h2>${i.confirmed_at?'<span class="chip fast">Checked</span>':''}</div><div class="panel-b stack">
+   <div><button class="btn sm ${ai?'quiet':''}" data-act="airead" ${S.busy.ai||!ph.length?'disabled':''}>${S.busy.ai?'<span class="spinner"></span> Reading photos…':ai?'Read photos again':'Read photos with AI'}</button>${!ph.length?' <span class="small muted">Add photos first.</span>':''}</div>
+   ${ai?`<div class="ai small">${ai.is_this_part===false?'<b style="color:var(--bad)">This may not be the right part. Check the photos.</b><br>':''}AI read: ${ai.part_numbers.length?ai.part_numbers.map(x=>`<b class="mono">${esc(x)}</b>`).join(', '):'no part number it could read clearly'} · grade <b>${esc(ai.grade||'?')}</b>${ai.notes?` · ${esc(ai.notes)}`:''}</div>`:''}
+   <form class="stack" data-form="confirm">
+    <label class="field"><span class="label">Part numbers (one per line) · check them against the label</span><textarea class="inp mono" name="pns" rows="2" data-sf="pns">${esc(X.pns??(i.part_numbers||[]).join('\n'))}</textarea></label>
+    <div class="row"><label class="field" style="width:auto"><span class="label">Grade</span><select class="inp" name="grade" style="width:auto">${['A','B','C'].map(g=>`<option ${((X.grade??i.grade)===g)?'selected':''}>${g}</option>`).join('')}</select></label>
+    <label class="field" style="flex:1;min-width:200px"><span class="label">Condition note for buyers</span><input class="inp" name="cond" data-sf="cond" value="${esc(X.cond??i.condition_text??'')}" maxlength="300"></label></div>
+    <div><button class="btn sm" ${S.busy.confirm?'disabled':''}>${S.busy.confirm?'<span class="spinner"></span> Saving…':'Looks right, save'}</button></div>
+   </form>
+   ${X.fits?.length?`<div class="small"><span class="label">Same part number, other cars</span>${X.fits.map(r=>`<div><b class="mono">${esc(r.part_number)}</b>: ${r.fits.length?r.fits.map(f=>`${esc(f.make)} ${esc(f.model)} ${f.year_from??''}${f.year_to&&f.year_to!==f.year_from?'–'+f.year_to:''}`).join(' · '):'only this car so far'}</div>`).join('')}</div>`:''}
+  </div></div>
+
+  <div class="panel"><div class="panel-h"><h2>Listing</h2></div><div class="panel-b stack">
+   <div><button class="btn sm ${D?'quiet':''}" data-act="draft" ${S.busy.draft?'disabled':''}>${S.busy.draft?'<span class="spinner"></span> Writing listing…':D?'Rebuild listing':'Write listing'}</button></div>
+   ${D?`<label class="field"><span class="label">Title · <span id="tlen">${(D.title||'').length}</span>/80</span><input class="inp" data-sf="title" maxlength="80" value="${esc(D.title)}"></label>
+   <div class="row"><label class="field" style="width:130px"><span class="label">Price $</span><input class="inp" data-sf="price" inputmode="decimal" value="${esc(D.price??'')}"></label>
+    <label class="field" style="flex:1;min-width:180px"><span class="label">eBay category${D.category_name?' · '+esc(D.category_name):''}</span><input class="inp mono" data-sf="category_id" inputmode="numeric" value="${esc(D.category_id||'')}" placeholder="category number"></label></div>
+   <label class="field"><span class="label">Fits (one per line: years make model)${D.generation?` · generation is ${D.generation.year_from}–${D.generation.year_to}`:''}</span><textarea class="inp" rows="3" data-sf="fitText">${esc(fitTxt)}</textarea></label>
+   ${D.generation&&D.fit?.length===1?`<div><button class="linkbtn small" data-act="usegen">Use the whole generation (${D.generation.year_from}–${D.generation.year_to})</button> <span class="small muted">only if you're sure the part number is the same across those years</span></div>`:''}
+   <label class="field"><span class="label">Item specifics (Name: value)</span><textarea class="inp" rows="${Math.min(10,aspTxt.split('\n').length+1)}" data-sf="aspText">${esc(aspTxt)}</textarea></label>
+   ${missing.length?`<div class="small" style="color:var(--bad)">eBay requires: ${missing.map(a=>`<b>${esc(a.name)}</b>${a.values?.length?` (e.g. ${esc(a.values.slice(0,3).join(', '))})`:''}`).join(' · ')}</div>`:''}
+   <details><summary class="small" style="cursor:pointer">Description</summary><textarea class="inp" rows="8" data-sf="description" style="margin-top:6px">${esc(D.description)}</textarea></details>
+   <p class="small muted">Package: ${D.size==='M'?'medium box, 10 lb':'small box, 3 lb'} · shipping, payment and returns use your eBay policies.</p>`:''}
+  </div></div>
+
+  <div class="panel"><div class="panel-h"><h2>Publish</h2></div><div class="panel-b stack">
+   ${!eb?'<p class="small muted"><span class="spinner"></span> Checking your eBay connection…</p>':!ready?`<p class="small">Finish <b>Settings → eBay selling</b> first (${!eb.connected?'connect your eBay account':'pick your policies and ship-from ZIP'}).</p><div><button class="btn sm quiet" data-act="tab" data-t="settings">Open Settings</button></div>`:''}
+   ${i.listing_error?`<div class="banner bad">${esc(i.listing_error)}</div>`:''}
+   <div><button class="btn good" data-act="publish" ${!ready||!D||!ph.length||S.busy.publish?'disabled':''}>${S.busy.publish?'<span class="spinner"></span> Publishing…':i.ebay_listing_id?'Update eBay listing':'Publish to eBay'}</button></div>
+  </div></div>
+  </div>`;
 }
 
 /* ---- Data ---- */
@@ -429,6 +487,7 @@ function vSettings(){
   const st=S.status||{};
   const ok=(b,yes,no)=>`<span class="chip ${b?'fast':'slow'}">${b?yes:no}</span>`;
   return `<h1>Settings</h1>
+  ${vEbaySettings()}
   <div class="panel"><div class="panel-h"><h2>Cutoff</h2></div><form class="panel-b stack" data-form="cutoff"><p class="small muted">Parts worth less than this when clean are hidden from pull sheets. Their data is kept, so lowering it later brings them back.</p>
    <div class="row"><span>$</span><input class="inp" style="width:110px" id="cutoff" name="cutoff" inputmode="numeric" value="${esc(st.part_min??60)}"><button class="btn">Save</button></div></form></div>
   <div class="panel"><div class="panel-h"><h2>Never pull</h2></div><div class="panel-b stack"><p class="small muted">These parts are left off every pull sheet and out of every car's value, and aren't searched on eBay. Their data is kept. Add parts from any pull sheet with "Never pull this part".</p>
@@ -448,6 +507,27 @@ function vSettings(){
    ${S.people.length?`<div class="list">${S.people.map(p=>`<div class="item"><span>${esc(p.email||p.user_id)}</span><span class="chip ${p.role==='owner'?'fast':'unknown'}">${p.role==='owner'?'Owner':'Check-in'}</span></div>`).join('')}</div>`:''}
    <form class="row" data-form="role"><input class="inp" style="flex:1;min-width:180px" id="roleemail" name="email" type="email" placeholder="their email"><select class="inp" style="width:auto" name="role"><option value="checkin">Check-in</option><option value="owner">Owner</option></select><button class="btn sm">Set role</button></form>
   </div></div>`;
+}
+
+function vEbaySettings(){
+  const e=S.ebay;
+  const head=`<div class="panel"><div class="panel-h"><h2>eBay selling</h2>${e?.connected?'<span class="chip fast">Connected</span>':''}</div><div class="panel-b stack small">`;
+  if(!e) return head+`<p class="muted"><span class="spinner"></span> Checking…</p></div></div>`;
+  if(e.error) return head+`<p style="color:var(--bad)">${esc(e.error)}</p></div></div>`;
+  if(!e.connected) return head+`<p class="muted">Connect the eBay account you sell on so parts can be listed straight from the Shelf, and sold parts get marked sold here automatically.</p>
+   ${e.runame?`<div><button class="btn sm" data-act="ebayconnect">Connect eBay account</button></div>`:`<p>First add the <span class="mono">EBAY_RUNAME</span> secret in Supabase (see the setup guide), then come back.</p>`}</div></div>`;
+  const P=e.policies||{}, sel=(name,list,cur)=>`<select class="inp" name="${name}"><option value="">Choose…</option>${(list||[]).map(p=>`<option value="${esc(p.id)}" ${cur===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select>`;
+  return head+`<p class="muted">Connected ${ago(e.connected_at)}.${e.last_order_sync?` Sales checked ${ago(e.last_order_sync)}.`:''} <button class="linkbtn" data-act="ebayconnect">Reconnect</button></p>
+   ${e.policy_error?`<p style="color:var(--bad)">${esc(e.policy_error)}</p>`:''}
+   ${P.fulfillment&&!P.fulfillment.length?`<p>You don't have business policies yet. Create a shipping, payment and return policy in eBay → Account → Business policies, then reload this page.</p>`:''}
+   <form class="stack" data-form="ebaysetup">
+    <label class="field"><span class="label">Shipping policy</span>${sel('fulfillment_policy_id',P.fulfillment,e.fulfillment_policy_id)}</label>
+    <label class="field"><span class="label">Payment policy</span>${sel('payment_policy_id',P.payment,e.payment_policy_id)}</label>
+    <label class="field"><span class="label">Return policy</span>${sel('return_policy_id',P.return,e.return_policy_id)}</label>
+    <div class="row"><label class="field" style="width:110px"><span class="label">Ship-from ZIP</span><input class="inp" name="postal_code" inputmode="numeric" value="${esc((e.location||'').split(', ').pop()||'')}"></label>
+     <label class="field" style="flex:1;min-width:120px"><span class="label">City</span><input class="inp" name="city" value="${esc((e.location||'').split(', ').length>2?(e.location||'').split(', ')[0]:'')}"></label>
+     <label class="field" style="width:70px"><span class="label">State</span><input class="inp" name="state" maxlength="2" value="${esc((e.location||'').split(', ').length>2?(e.location||'').split(', ')[1]:'')}"></label></div>
+    <div><button class="btn sm" ${S.busy.ebaysetup?'disabled':''}>${S.busy.ebaysetup?'<span class="spinner"></span> Saving…':'Save'}</button></div></form></div></div>`;
 }
 
 /* ===== Actions ===== */
@@ -549,6 +629,78 @@ async function updateItem(id,to,form){
   if(error){ toast('Could not save'); return; }
   Object.assign(i,patch); draw();
 }
+/* ---- Selling ---- */
+async function loadEbay(){ try{ S.ebay=await fn({action:'ebay_status'}); }catch(e){ S.ebay={error:e.message}; } draw(); }
+function openSell(id){ const i=S.items.find(x=>x.id===+id); if(!i) return; S.sell={id:i.id, draft:i.draft?{...i.draft}:null, ai:i.ai_grade?{part_numbers:i.part_numbers||[],grade:i.ai_grade,notes:i.ai_notes}:null}; draw(); window.scrollTo({top:0}); if(!S.ebay||S.ebay.error) loadEbay(); }
+function shrink(file,max=1600){
+  return new Promise((ok,bad)=>{ const url=URL.createObjectURL(file), img=new Image();
+    img.onload=()=>{ const r=Math.min(1,max/Math.max(img.width,img.height)), c=document.createElement('canvas'); c.width=Math.round(img.width*r); c.height=Math.round(img.height*r);
+      c.getContext('2d').drawImage(img,0,0,c.width,c.height); URL.revokeObjectURL(url); c.toBlob(b=>b?ok(b):bad(new Error('Could not read photo')),'image/jpeg',.86); };
+    img.onerror=()=>{ URL.revokeObjectURL(url); bad(new Error('Could not read photo')); }; img.src=url; });
+}
+async function uploadPhotos(files){
+  const i=S.items.find(x=>x.id===S.sell?.id); if(!i) return;
+  const list=[...files].slice(0,12-(i.photos||[]).length); if(!list.length) return;
+  S.busy.upload=true; draw();
+  const added=[], folder=`items/${(i.sku||'item-'+i.id).replace(/[^A-Za-z0-9-]/g,'')}`;
+  for(const f of list){
+    try{ const blob=await shrink(f), path=`${folder}/${Date.now()}-${Math.random().toString(36).slice(2,6)}.jpg`;
+      const {error}=await sb.storage.from('parts').upload(path,blob,{contentType:'image/jpeg',upsert:false}); if(error) throw error;
+      added.push({path,url:sb.storage.from('parts').getPublicUrl(path).data.publicUrl}); }
+    catch(e){ toast('A photo didn\'t upload: '+(e.message||e)); }
+  }
+  if(added.length){ const photos=[...(i.photos||[]),...added]; const {error}=await sb.from('pm_items').update({photos}).eq('id',i.id); if(error) toast('Could not save photos'); else i.photos=photos; }
+  S.busy.upload=false; draw();
+}
+async function deletePhoto(n){
+  const i=S.items.find(x=>x.id===S.sell?.id); if(!i) return; const p=(i.photos||[])[n]; if(!p) return;
+  const photos=i.photos.filter((_,k)=>k!==n); const {error}=await sb.from('pm_items').update({photos}).eq('id',i.id);
+  if(error){ toast('Could not remove photo'); return; } i.photos=photos; draw();
+  sb.storage.from('parts').remove([p.path]).catch(()=>{});
+}
+async function aiRead(){
+  const i=S.items.find(x=>x.id===S.sell?.id); if(!i) return; S.busy.ai=true; draw();
+  try{ const r=await fn({action:'analyze_photos',id:i.id}); if(r.error) toast(r.error); else { S.sell.ai=r; S.sell.pns=r.part_numbers.join('\n'); if(r.grade) S.sell.grade=r.grade; if(r.condition_text) S.sell.cond=r.condition_text; Object.assign(i,{part_numbers:r.part_numbers,ai_grade:r.grade,ai_notes:r.notes,condition_text:r.condition_text}); } }
+  catch(e){ toast(e.message); }
+  S.busy.ai=false; draw();
+}
+async function confirmItem(f){
+  const i=S.items.find(x=>x.id===S.sell?.id); if(!i) return; S.busy.confirm=true; draw();
+  const pns=f.pns.value.split(/[\n,]+/).map(x=>x.trim()).filter(Boolean);
+  try{ const r=await fn({action:'confirm_item',id:i.id,part_numbers:pns,grade:f.grade.value,condition_text:f.cond.value}); if(r.error) toast(r.error); else { Object.assign(i,{part_numbers:pns,grade:f.grade.value,condition_text:f.cond.value,confirmed_at:new Date().toISOString()}); Object.assign(S.sell,{fits:r.fits,pns:null,grade:null,cond:null}); toast('Saved'); } }
+  catch(e){ toast(e.message); }
+  S.busy.confirm=false; draw();
+}
+async function makeDraft(){
+  const i=S.items.find(x=>x.id===S.sell?.id); if(!i) return; S.busy.draft=true; draw();
+  try{ const r=await fn({action:'listing_draft',id:i.id}); if(r.error) toast(r.error); else { S.sell.draft=r.draft; i.draft=r.draft; if(!r.draft.category_id) toast('Pick the eBay category number by hand: it couldn\'t be found automatically.'); } }
+  catch(e){ toast(e.message); }
+  S.busy.draft=false; draw();
+}
+function draftOut(){
+  const D=S.sell.draft; const out={...D}; delete out.fitText; delete out.aspText;
+  if(D.fitText!=null) out.fit=D.fitText.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{ const m=l.match(/^(\d{4})(?:\s*[-–]\s*(\d{4}))?\s+(\S+)\s+(.+)$/); return m?{year_from:+m[1],year_to:+(m[2]||m[1]),make:m[3],model:m[4].trim()}:null; }).filter(Boolean);
+  if(D.aspText!=null){ out.aspects={}; for(const l of D.aspText.split('\n')){ const k=l.indexOf(':'); if(k>0){ const n=l.slice(0,k).trim(), v=l.slice(k+1).split(',').map(x=>x.trim()).filter(Boolean); if(n&&v.length) out.aspects[n]=v; } } }
+  out.price=parseFloat(String(D.price??'').replace(/[$,]/g,''));
+  return out;
+}
+async function publish(){
+  const i=S.items.find(x=>x.id===S.sell?.id); if(!i||!S.sell.draft) return;
+  const d=draftOut(); if(!(d.price>0)){ toast('Enter a price'); return; } if(!d.fit.length){ toast('Add at least one "years make model" line under Fits'); return; }
+  S.busy.publish=true; draw();
+  try{ const r=await fn({action:'publish',id:i.id,draft:d});
+    if(r.error){ i.listing_error=r.error; toast('eBay didn\'t accept it. See the message.'); }
+    else { Object.assign(i,{status:'listed',ebay_listing_id:r.listing_id,listed_at:new Date().toISOString(),list_price:d.price,listing_error:null,draft:d}); S.sell.draft={...d}; toast('Listed on eBay'); } }
+  catch(e){ toast(e.message); }
+  S.busy.publish=false; draw();
+}
+async function ebayConnect(){ try{ const r=await fn({action:'ebay_connect',return_url:location.href.split('#')[0]}); if(r.error){ toast(r.error); return; } location.href=r.url; }catch(e){ toast(e.message); } }
+async function ebaySetup(f){
+  S.busy.ebaysetup=true; draw();
+  const b={action:'ebay_setup'}; for(const k of ['fulfillment_policy_id','payment_policy_id','return_policy_id','postal_code','city','state']) if(f[k]?.value) b[k]=f[k].value.trim();
+  try{ const r=await fn(b); if(r.error) toast(r.error); else { toast('eBay settings saved'); await loadEbay(); } }catch(e){ toast(e.message); }
+  S.busy.ebaysetup=false; draw();
+}
 async function saveCutoff(form){
   const n=Math.round(Number(String(form.cutoff.value).replace(/[$,]/g,'')));
   if(!(n>=0&&n<10000)){ toast('Enter a dollar amount'); return; }
@@ -608,6 +760,8 @@ async function afterLogin(){
   const {data:role,error}=await sb.rpc('pm_my_role');
   if(error){ S.err='Could not reach the database. Check that the database setup script was run.'; draw(); return; }
   S.role=role; S.tab='checkin';
+  const back=/^#ebay=/.test(location.hash)?decodeURIComponent(location.hash.slice(6)):null;
+  if(back!=null){ history.replaceState(null,'',location.pathname+location.search); if(role==='owner'){ S.tab='settings'; setTimeout(()=>toast(back==='connected'?'eBay account connected':back),300); loadEbay(); } }
   try{ S.status=await fn({action:'status'}); }catch(e){ S.err='The server function isn\'t reachable yet: '+e.message; }
   await Promise.all([loadCars(),loadPlatforms(),loadItems(),loadPeople()]);
   draw(); gatherLoop();
@@ -653,7 +807,7 @@ function stopCamera(){ S.scanning=false; clearTimeout(camTimer); camTimer=null; 
 /* ===== Events ===== */
 document.addEventListener('click',e=>{
   const t=e.target.closest('[data-act]'); if(!t) return; const a=t.dataset.act;
-  if(a==='tab'){ if(S.scanning) stopCamera(); S.tab=t.dataset.t; S.research=null; S.err=''; draw(); window.scrollTo({top:0}); if(S.tab==='data') fn({action:'status'}).then(s=>{S.status=s;}).catch(()=>{}).finally(loadData); if(S.tab==='settings') fn({action:'status'}).then(s=>{S.status=s;draw();}).catch(()=>{}); }
+  if(a==='tab'){ if(S.scanning) stopCamera(); S.tab=t.dataset.t; S.research=null; S.err=''; draw(); window.scrollTo({top:0}); if(S.tab==='data') fn({action:'status'}).then(s=>{S.status=s;}).catch(()=>{}).finally(loadData); if(S.tab==='settings'){ fn({action:'status'}).then(s=>{S.status=s;draw();}).catch(()=>{}); loadEbay(); } if(S.tab!=='shelf') S.sell=null; }
   else if(a==='add') addCars();
   else if(a==='camera'){ S.scanning?stopCamera():startCamera(); }
   else if(a==='day'){ S.day=t.dataset.d; draw(); }
@@ -682,6 +836,14 @@ document.addEventListener('click',e=>{
   else if(a==='editgen'){ const d=S.carData, g=d.generation, v=d.vehicle; S.genEdit={vehicle:{make:v.make,model:v.model,year:v.year},id:g?.id,year_from:g?.year_from??v.year,year_to:g?.year_to??v.year,sisters:(g?.sisters||[]).map(x=>`${x.make} ${x.model} ${x.year_from}-${x.year_to}`).join('\n')}; draw(); }
   else if(a==='canceledit'){ S.genEdit=null; draw(); }
   else if(a==='backup') downloadBackup();
+  else if(a==='sell') openSell(t.dataset.id);
+  else if(a==='closesell'){ S.sell=null; draw(); }
+  else if(a==='delphoto') deletePhoto(+t.dataset.n);
+  else if(a==='airead') aiRead();
+  else if(a==='draft') makeDraft();
+  else if(a==='usegen'){ const D=S.sell.draft, f=(draftOut().fit[0])||D.fit[0]; D.fitText=`${D.generation.year_from}-${D.generation.year_to} ${f.make} ${f.model}`; draw(); }
+  else if(a==='publish') publish();
+  else if(a==='ebayconnect') ebayConnect();
   else if(a==='cleanup') cleanup();
   else if(a==='runnow'){ S.gather.running=false; fn({action:'process'}).then(r=>{ S.gather.info=r; toast(`Gathered ${r.models_done} model${r.models_done===1?'':'s'} · ${r.cars_waiting} cars still waiting`); return Promise.all([loadCars(),fn({action:'status'}).then(s=>S.status=s)]); }).catch(e=>toast(e.message)).finally(draw); }
 });
@@ -694,6 +856,7 @@ document.addEventListener('input',e=>{
   if(t.id==='psrc'&&S.research) S.research.src=t.value;
   if(t.id==='shelfq'){ S.shelfQ=t.value; draw(); }
   if(t.id==='usesis'&&S.research) S.research.useSisters=t.checked;
+  if(t.dataset?.sf&&S.sell){ const k=t.dataset.sf; if(['pns','cond'].includes(k)) S.sell[k]=t.value; else if(S.sell.draft){ S.sell.draft[k]=t.value; if(k==='title'){ const n=$('#tlen'); if(n) n.textContent=t.value.length; } } }
 });
 document.addEventListener('submit',async e=>{
   e.preventDefault(); const f=e.target;
@@ -709,6 +872,8 @@ document.addEventListener('submit',async e=>{
   if(f.dataset.form==='item') updateItem(f.dataset.id,e.submitter?.value||'listed',f);
   if(f.dataset.form==='cutoff') saveCutoff(f);
   if(f.dataset.form==='role') setRole(f);
+  if(f.dataset.form==='confirm') confirmItem(f);
+  if(f.dataset.form==='ebaysetup') ebaySetup(f);
   if(f.dataset.form==='gen'){
     const E=S.genEdit; const sisters=f.sis.value.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{ const m=l.match(/^(\S+)\s+(.+?)(?:\s+(\d{4})\s*[-–]\s*(\d{4}))?$/); return m?{make:m[1],model:m[2],year_from:m[3]?+m[3]:undefined,year_to:m[4]?+m[4]:undefined}:null; }).filter(Boolean);
     fn({action:'save_generation',vehicle:E.vehicle,id:E.id,year_from:+f.yf.value,year_to:+f.yt.value,sisters}).then(r=>{ if(r.error){ toast(r.error); return; } toast('Generation saved'); S.genEdit=null; return openCar(S.carData.vehicle.id); }).catch(e=>toast(e.message));
@@ -719,6 +884,7 @@ document.addEventListener('change',e=>{
   if(t.id==='dq-days'){ S.dataQ.days=+t.value; loadData(); }
   if(t.id==='dq-make'){ S.dataQ.make=t.value; loadData(); }
   if(t.id==='dq-sold'){ S.dataQ.sold_only=t.checked; loadData(); }
+  if(t.id==='photoin'&&t.files?.length) uploadPhotos(t.files);
 });
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&S.user) gatherLoop(); });
 $('#signout').onclick=async()=>{ await sb.auth.signOut(); Object.assign(S,{user:null,role:null,cars:[],items:[],carData:null,research:null,data:null,status:null}); draw(); };

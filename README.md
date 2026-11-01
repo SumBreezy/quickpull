@@ -41,6 +41,8 @@ remembers it for every car like it, and tells the yard where the car goes: **Pul
    - `CRON_SECRET`: any long random text, for example 30 random letters and numbers
    - Only if the app later says "The function can't reach the database": `QP_SECRET_KEY`, set to the **secret** key from Project Settings → API Keys (starts with `sb_secret_`)
    - Only if eBay approves Marketplace Insights: `EBAY_INSIGHTS` = `on`
+   - `ANTHROPIC_API_KEY`: for generations and reading part photos
+   - `EBAY_RUNAME`: for listing on eBay (see "Selling on eBay" below)
 
 ### 3. The background timer
 Follow the three lines at the top of `supabase/cron.sql`, then run it in the SQL Editor.
@@ -57,6 +59,22 @@ After a minute, the app is at `https://sumbreezy.github.io/quickpull/`. On iPhon
 ### 6. First sign-in
 **Sign in yourself first.** The first person to sign in becomes the owner. Everyone else starts as check-in, which only sees the Check-in page.
 You can change roles in **Settings → Team**.
+
+## Selling on eBay from the Shelf (one-time, about 10 minutes)
+1. **Get your RuName.** In the eBay developer portal open **User Tokens** for your **Production** keyset → **Get a Token from eBay via Your Application** → **Add eBay Redirect URL**.
+   - **Your auth accepted URL:** `https://YOUR-PROJECT-REF.supabase.co/functions/v1/ebay-lookup`
+   - **Your auth declined URL:** the same address
+   - **Privacy policy URL:** your app address works (`https://sumbreezy.github.io/quickpull/`)
+   - Save. eBay shows a name like `Theran_Xxxx-QuickPul-PRD-abc123`. That is the **RuName**.
+2. In Supabase → **Edge Functions → Secrets**, add `EBAY_RUNAME` = that RuName.
+3. On eBay (the seller account), make sure you have **Business policies** for shipping, payment, and returns (eBay → Account → Business policies).
+4. In the app: **Settings → eBay selling → Connect eBay account**, sign in to your seller account, and accept. Then pick your three policies, enter your ship-from ZIP, and Save.
+
+How a listing works: **Shelf → Photos & list on eBay** → add photos (label close-up first) → **Read photos with AI** (part number + grade; needs `ANTHROPIC_API_KEY`) → check and **Looks right, save** → **Write listing** → check the title, price, category, fitment and specifics → **Publish to eBay**.
+- Fitment starts as **this car only**. Widen it only when you're sure the part number matches across those years.
+- Every confirmed part number goes into your own "same part, different car" list.
+- When it sells on eBay, the app marks it Sold with the real price (checked every 15 minutes).
+- If eBay rejects a listing, its exact message shows on the part. Fix that field and publish again.
 
 ## If something doesn't work
 - **"eBay keys are missing or wrong"**: use the **Production** keys, not Sandbox.

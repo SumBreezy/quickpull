@@ -185,6 +185,41 @@ create index if not exists pm_interchange_pn on pm_interchange (part_number);
 create index if not exists pm_interchange_model on pm_interchange (make, model);
 
 ------------------------------------------------------------------
+-- Selling on eBay: photos, AI reading of the photos, listing details
+------------------------------------------------------------------
+alter table pm_items add column if not exists photos          jsonb;     -- [{path, url}]
+alter table pm_items add column if not exists part_numbers    text[];
+alter table pm_items add column if not exists ai_grade        text;
+alter table pm_items add column if not exists ai_notes        text;
+alter table pm_items add column if not exists condition_text  text;
+alter table pm_items add column if not exists confirmed_at    timestamptz;   -- part numbers / grade checked by a person
+alter table pm_items add column if not exists draft           jsonb;     -- listing draft (title, category, specifics, fitment, package)
+alter table pm_items add column if not exists ebay_offer_id   text;
+alter table pm_items add column if not exists ebay_listing_id text;
+alter table pm_items add column if not exists listing_error   text;
+alter table pm_items add column if not exists channel         text default 'ebay';
+
+-- eBay seller connection. No policies on purpose: only the server function can read it (it holds sign-in tokens).
+create table if not exists pm_ebay (
+  id                    int primary key default 1 check (id = 1),
+  refresh_token         text,
+  refresh_expires_at    timestamptz,
+  access_token          text,
+  access_expires_at     timestamptz,
+  connected_at          timestamptz,
+  oauth_state           text,
+  return_url            text,
+  location_key          text,
+  location_label        text,
+  fulfillment_policy_id text,
+  payment_policy_id     text,
+  return_policy_id      text,
+  last_order_sync       timestamptz
+);
+insert into pm_ebay (id) values (1) on conflict (id) do nothing;
+alter table pm_ebay enable row level security;
+
+------------------------------------------------------------------
 -- Settings, eBay usage, and who is who
 ------------------------------------------------------------------
 create table if not exists pm_settings (
@@ -313,3 +348,12 @@ create policy "owner" on pm_people     for select to authenticated using (pm_is_
 grant execute on function pm_my_role() to authenticated;
 grant execute on function pm_set_role(text, text) to authenticated;
 revoke execute on function pm_add_calls(int) from public, anon, authenticated;
+
+-- Photo storage: public so eBay can show the pictures; only the owner can add or remove them
+insert into storage.buckets (id, name, public) values ('parts', 'parts', true) on conflict (id) do nothing;
+drop policy if exists "quickpull owner adds photos" on storage.objects;
+drop policy if exists "quickpull owner changes photos" on storage.objects;
+drop policy if exists "quickpull owner removes photos" on storage.objects;
+create policy "quickpull owner adds photos" on storage.objects for insert to authenticated with check (bucket_id = 'parts' and public.pm_is_owner());
+create policy "quickpull owner changes photos" on storage.objects for update to authenticated using (bucket_id = 'parts' and public.pm_is_owner());
+create policy "quickpull owner removes photos" on storage.objects for delete to authenticated using (bucket_id = 'parts' and public.pm_is_owner());

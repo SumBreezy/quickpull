@@ -760,7 +760,9 @@ async function processQueue(budgetMs: number) {
     }
     if (old.length) await addInterchangeFromSales(old);
   }
-  // 6. weekly backup into Supabase Storage
+  // 6. parts sold on eBay get marked sold (every 15 minutes)
+  try { await syncOrders(); } catch (e) { notes.add("order_sync: " + (e as Error).message.slice(0, 80)); }
+  // 7. weekly backup into Supabase Storage
   try { const s = await settings(); if (daysOld(s.last_backup_at) >= 7) await storeBackup(); } catch (e) { notes.add("backup_failed: " + (e as Error).message); }
   await rest("PATCH", "pm_settings?id=eq.1", { last_process_at: nowIso() }, "return=minimal");
   const left = (await rest("GET", "pm_vehicles?status=eq.queued&select=platform")) || [];
@@ -1220,6 +1222,313 @@ async function partNumberInfo(pn: string) {
   return { part_number: pn, fits: [...fits.values()].map((f) => ({ ...f, sources: [...f.sources] })), prices: priceStats(rows.map((r: any) => Number(r.price)).filter(Boolean)) };
 }
 
+// ===================================================================
+// Selling: AI reading of photos, "same part, different car", eBay listing
+// ===================================================================
+const SELL_SCOPES = ["https://api.ebay.com/oauth/api_scope", "https://api.ebay.com/oauth/api_scope/sell.inventory", "https://api.ebay.com/oauth/api_scope/sell.account", "https://api.ebay.com/oauth/api_scope/sell.fulfillment"];
+const PACKAGES: Record<string, any> = {
+  S: { weight: { value: 3, unit: "POUND" }, dimensions: { length: 12, width: 10, height: 6, unit: "INCH" } },
+  M: { weight: { value: 10, unit: "POUND" }, dimensions: { length: 22, width: 16, height: 12, unit: "INCH" } },
+};
+const GRADE_CONDITION: Record<string, string> = {
+  A: "Clean used OEM part. Pulled from a running/driving vehicle where possible. Minimal wear.",
+  B: "Used OEM part with light wear and normal scuffs. Fully intact.",
+  C: "Used OEM part with visible cosmetic wear. See photos for exact condition.",
+};
+// Same number written two ways ("GM 2098 3440" and "20983440") counts once
+function cleanPns(list: unknown[]) {
+  const all = [...new Set(list.map((x) => String(x).toUpperCase().replace(/[\s]+/g, "")).filter((x) => x.length >= 5 && x.length <= 20))];
+  return all.filter((x) => !all.some((y) => y !== x && x.endsWith(y) && /^[A-Z]{1,4}-?$/.test(x.slice(0, x.length - y.length))));
+}
+async function itemRow(id: number) { return (await rest("GET", `pm_items?id=eq.${Number(id)}&select=*`))?.[0] || null; }
+async function vehicleRow(id: number | null) { return id ? (await rest("GET", `pm_vehicles?id=eq.${Number(id)}&select=*`))?.[0] || null : null; }
+
+// Claude looks at the photos: part numbers, condition grade, notes
+async function analyzePhotos(itemId: number) {
+  const it = await itemRow(itemId);
+  if (!it) return { error: "Part not found." };
+  const photos = (it.photos || []).slice(0, 8);
+  if (!photos.length) return { error: "Add photos first." };
+  if (!env("ANTHROPIC_API_KEY")) return { error: "Add the ANTHROPIC_API_KEY secret to read photos." };
+  const v = await vehicleRow(it.vehicle_id);
+  const content: any[] = photos.map((ph: any) => ({ type: "image", source: { type: "url", url: ph.url } }));
+  content.push({ type: "text", text: `These photos show one used OEM auto part pulled from a ${[v?.year, v?.make, v?.model, v?.trim].filter(Boolean).join(" ")}. The part is: ${it.part_name}.
+1) Read every OEM part number printed, stamped, or on a label (manufacturer part numbers, not barcodes' serials, not dates). Copy them exactly. Skip anything you can't read clearly.
+2) Grade its condition for resale: A = clean, no damage, minimal wear. B = light wear or scuffs, fully intact. C = visible damage such as cracks, broken tabs, haze, deep scratches, missing pieces.
+3) Write short notes on anything a buyer should know, and one line of condition text for an eBay listing.
+Reply with JSON only: {"part_numbers":["..."],"grade":"A|B|C","notes":"...","condition_text":"...","is_this_part":true}` });
+  const key = env("ANTHROPIC_API_KEY");
+  let out = "", lastErr = "";
+  for (const model of [env("CLAUDE_VISION_MODEL") || "claude-sonnet-5-5", "claude-haiku-5-5"]) {
+    const r = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" }, body: JSON.stringify({ model, max_tokens: 800, messages: [{ role: "user", content }] }) });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok) { out = (d.content || []).map((c: any) => c.text || "").join(""); break; }
+    lastErr = `${r.status}: ${d?.error?.message || ""}`;
+    if (r.status !== 404 && r.status !== 400) break;
+  }
+  if (!out) return { error: "Claude couldn't read the photos (" + lastErr.slice(0, 120) + ")." };
+  const j = firstJson(out) || {};
+  const pns = cleanPns(j.part_numbers || []);
+  const grade = ["A", "B", "C"].includes(j.grade) ? j.grade : null;
+  await rest("PATCH", `pm_items?id=eq.${it.id}`, { part_numbers: pns, ai_grade: grade, ai_notes: String(j.notes || "").slice(0, 600), condition_text: String(j.condition_text || "").slice(0, 300) }, "return=minimal");
+  return { part_numbers: pns, grade, notes: j.notes || "", condition_text: j.condition_text || "", is_this_part: j.is_this_part !== false };
+}
+// A person confirms what the photos say; that's what goes into "same part, different car"
+async function confirmItem(b: any) {
+  const it = await itemRow(b.id);
+  if (!it) return { error: "Part not found." };
+  const pns = cleanPns(b.part_numbers || []);
+  const grade = ["A", "B", "C"].includes(b.grade) ? b.grade : it.grade;
+  await rest("PATCH", `pm_items?id=eq.${it.id}`, { part_numbers: pns, grade, condition_text: String(b.condition_text ?? it.condition_text ?? "").slice(0, 300), confirmed_at: nowIso() }, "return=minimal");
+  const v = await vehicleRow(it.vehicle_id);
+  const rows = pns.map((pn) => ({ part_number: pn, part_key: it.part_key, part_name: it.part_name, make: v?.make, model: v?.model, year_from: Number(v?.year) || null, year_to: Number(v?.year) || null, source: it.photos?.length ? "photo" : "pulled", ref: it.sku || String(it.id), price: it.list_price }));
+  if (rows.length) await rest("POST", "pm_interchange?on_conflict=part_number,source,ref", rows, "resolution=merge-duplicates,return=minimal");
+  const fits = [];
+  for (const pn of pns) fits.push(await partNumberInfo(pn));
+  return { ok: true, fits };
+}
+
+// ---------- eBay seller connection ----------
+async function ebayRow() { return (await rest("GET", "pm_ebay?id=eq.1&select=*"))?.[0] || {}; }
+async function ebayConnectUrl(returnUrl: string) {
+  const id = env("EBAY_CLIENT_ID"), ru = env("EBAY_RUNAME");
+  if (!id || !ru) return { error: "Add the EBAY_RUNAME secret first (see the setup guide)." };
+  const state = crypto.randomUUID();
+  await rest("PATCH", "pm_ebay?id=eq.1", { oauth_state: state, return_url: String(returnUrl || "").slice(0, 300) }, "return=minimal");
+  return { url: "https://auth.ebay.com/oauth2/authorize?" + new URLSearchParams({ client_id: id, response_type: "code", redirect_uri: ru, scope: SELL_SCOPES.join(" "), state }).toString() };
+}
+async function ebayTokenCall(params: Record<string, string>) {
+  const r = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: "Basic " + btoa(`${env("EBAY_CLIENT_ID")}:${env("EBAY_CLIENT_SECRET")}`) },
+    body: new URLSearchParams(params).toString(),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || !d.access_token) throw new Error("ebay_signin_failed: " + (d.error_description || d.error || r.status));
+  return d;
+}
+async function ebayOauthCallback(url: URL) {
+  const row = await ebayRow();
+  const back = (msg: string) => new Response(null, { status: 302, headers: { Location: (row.return_url || "/") + "#ebay=" + encodeURIComponent(msg) } });
+  if (!url.searchParams.get("code")) return back(url.searchParams.get("error_description") || "eBay sign-in was cancelled");
+  if (!row.oauth_state || url.searchParams.get("state") !== row.oauth_state) return back("Sign-in link expired. Try Connect eBay again.");
+  try {
+    const d = await ebayTokenCall({ grant_type: "authorization_code", code: url.searchParams.get("code")!, redirect_uri: env("EBAY_RUNAME") });
+    await rest("PATCH", "pm_ebay?id=eq.1", {
+      refresh_token: d.refresh_token, refresh_expires_at: new Date(Date.now() + (d.refresh_token_expires_in || 47304000) * 1000).toISOString(),
+      access_token: d.access_token, access_expires_at: new Date(Date.now() + (d.expires_in || 7200) * 1000).toISOString(), connected_at: nowIso(), oauth_state: null,
+    }, "return=minimal");
+    return back("connected");
+  } catch (e) { return back((e as Error).message); }
+}
+async function sellToken() {
+  const row = await ebayRow();
+  if (!row.refresh_token) throw new Error("ebay_not_connected");
+  if (row.access_token && new Date(row.access_expires_at).getTime() > Date.now() + 120_000) return row.access_token as string;
+  const d = await ebayTokenCall({ grant_type: "refresh_token", refresh_token: row.refresh_token, scope: SELL_SCOPES.join(" ") });
+  await rest("PATCH", "pm_ebay?id=eq.1", { access_token: d.access_token, access_expires_at: new Date(Date.now() + (d.expires_in || 7200) * 1000).toISOString() }, "return=minimal");
+  return d.access_token as string;
+}
+export async function sell(method: string, path: string, body?: unknown) {
+  const token = await sellToken();
+  const r = await fetch(`https://api.ebay.com${path}`, {
+    method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "Content-Language": "en-US", "Accept-Language": "en-US", "X-EBAY-C-MARKETPLACE-ID": "EBAY_US" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const t = await r.text();
+  const d = t ? (() => { try { return JSON.parse(t); } catch { return { raw: t }; } })() : {};
+  if (!r.ok) { const m = (d.errors || []).map((e: any) => e.longMessage || e.message).filter(Boolean).join(" · ") || t.slice(0, 200) || r.status; throw new Error(`eBay said: ${m}`); }
+  return d;
+}
+async function ebaySellerStatus() {
+  const row = await ebayRow();
+  const out: any = { connected: !!row.refresh_token, connected_at: row.connected_at, runame: !!env("EBAY_RUNAME"), location: row.location_label || null,
+    fulfillment_policy_id: row.fulfillment_policy_id, payment_policy_id: row.payment_policy_id, return_policy_id: row.return_policy_id, last_order_sync: row.last_order_sync };
+  if (!row.refresh_token) return out;
+  try {
+    const [f, p, r] = await Promise.all(["fulfillment_policy", "payment_policy", "return_policy"].map((k) => sell("GET", `/sell/account/v1/${k}?marketplace_id=EBAY_US`)));
+    out.policies = {
+      fulfillment: (f.fulfillmentPolicies || []).map((x: any) => ({ id: x.fulfillmentPolicyId, name: x.name })),
+      payment: (p.paymentPolicies || []).map((x: any) => ({ id: x.paymentPolicyId, name: x.name })),
+      return: (r.returnPolicies || []).map((x: any) => ({ id: x.returnPolicyId, name: x.name })),
+    };
+  } catch (e) { out.policy_error = (e as Error).message; }
+  return out;
+}
+async function ebaySellerSetup(b: any) {
+  const patch: any = {};
+  for (const k of ["fulfillment_policy_id", "payment_policy_id", "return_policy_id"]) if (b[k]) patch[k] = String(b[k]);
+  if (b.postal_code) {
+    const key = "quickpull-yard";
+    const loc = { location: { address: { city: b.city || undefined, stateOrProvince: b.state || undefined, postalCode: String(b.postal_code), country: "US" } }, locationTypes: ["WAREHOUSE"], name: "QuickPull yard", merchantLocationStatus: "ENABLED" };
+    try { await sell("POST", `/sell/inventory/v1/location/${key}`, loc); }
+    catch (e) { if (!/already exists|25803/i.test((e as Error).message)) throw e; await sell("POST", `/sell/inventory/v1/location/${key}/update_location_details`, { location: loc.location }).catch(() => null); }
+    patch.location_key = key; patch.location_label = [b.city, b.state, b.postal_code].filter(Boolean).join(", ");
+  }
+  if (Object.keys(patch).length) await rest("PATCH", "pm_ebay?id=eq.1", patch, "return=minimal");
+  return { ok: true };
+}
+
+// ---------- Listing draft ----------
+const SIDE: Record<string, string> = { _l: "Left", _r: "Right" };
+const capWords = (x: string) => x.split(" ").map((w) => (/^[A-Z0-9-]{2,}$/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1))).join(" ");
+function listingName(it: any) {
+  const n = capWords(String(it.part_name || "").replace(/[()]/g, " ").replace(/\s*\/\s*/g, " ").replace(/,?\s*(driver|passenger|left|right)\b.*$/i, "").replace(/\s+/g, " ").trim());
+  const side = /_l$/.test(it.part_key) ? "Driver Left" : /_r$/.test(it.part_key) ? "Passenger Right" : "";
+  return [side, n].filter(Boolean).join(" ");
+}
+async function suggestCategory(q: string, v: any) {
+  const token = await ebayToken(BROWSE_SCOPE);
+  for (const tree of ["100", "0"]) {
+    try {
+      const r = await fetch(`https://api.ebay.com/commerce/taxonomy/v1/category_tree/${tree}/get_category_suggestions?q=${enc(q)}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!r.ok) continue;
+      const d = await r.json();
+      const hit = (d.categorySuggestions || []).find((c: any) => (c.categoryTreeNodeAncestors || []).some((a: any) => /parts|accessories|motors/i.test(a.categoryName)));
+      if (hit) return { id: hit.category.categoryId, name: hit.category.categoryName, tree };
+    } catch { /* try the next way */ }
+  }
+  // Fallback: the category most used by similar used listings
+  try {
+    const r = await fetch(`https://api.ebay.com/buy/browse/v1/item_summary/search?` + new URLSearchParams({ q, category_ids: EBAY_CATEGORY, filter: "conditions:{USED}", limit: "50" }), { headers: { Authorization: `Bearer ${token}`, "X-EBAY-C-MARKETPLACE-ID": "EBAY_US" } });
+    callCount++;
+    if (r.ok) {
+      const d = await r.json(), count = new Map<string, { n: number; name: string }>();
+      for (const i of d.itemSummaries || []) {
+        const leaf = (i.leafCategoryIds || [])[0]; if (!leaf) continue;
+        const name = (i.categories || [])[0]?.categoryName || "";
+        const c = count.get(leaf) || { n: 0, name }; c.n++; count.set(leaf, c);
+      }
+      const best = [...count.entries()].sort((x, y) => y[1].n - x[1].n)[0];
+      if (best) return { id: best[0], name: best[1].name, tree: "0" };
+    }
+  } catch { /* fill it in by hand */ }
+  void v;
+  return null;
+}
+async function requiredAspects(categoryId: string, tree: string) {
+  try {
+    const token = await ebayToken(BROWSE_SCOPE);
+    const r = await fetch(`https://api.ebay.com/commerce/taxonomy/v1/category_tree/${tree}/get_item_aspects_for_category?category_id=${enc(categoryId)}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!r.ok) return [];
+    const d = await r.json();
+    return (d.aspects || []).filter((a: any) => a.aspectConstraint?.aspectRequired || a.aspectConstraint?.aspectUsage === "RECOMMENDED").slice(0, 25)
+      .map((a: any) => ({ name: a.localizedAspectName, required: !!a.aspectConstraint?.aspectRequired, values: (a.aspectValues || []).slice(0, 40).map((x: any) => x.localizedValue) }));
+  } catch { return []; }
+}
+async function listingDraft(itemId: number) {
+  const it = await itemRow(itemId);
+  if (!it) return { error: "Part not found." };
+  const v = await vehicleRow(it.vehicle_id) || {};
+  const gen = v.make ? (await generationFor(v)).generation : null;
+  const pn = (it.part_numbers || [])[0] || "";
+  // Fitment: what this part number is known to fit; otherwise this car only (you can widen it to the generation)
+  let fit: any[] = [{ year_from: Number(v.year), year_to: Number(v.year), make: v.make, model: v.model, why: "this car" }];
+  if (pn) {
+    const info = await partNumberInfo(pn);
+    const known = info.fits.filter((f: any) => f.make && f.model && f.year_from).map((f: any) => ({ year_from: f.year_from, year_to: f.year_to || f.year_from, make: f.make, model: f.model, why: `part # ${pn} seen ${f.seen}×` }));
+    if (known.length) fit = known;
+  }
+  const yrs = fit.length === 1 && fit[0].year_from !== fit[0].year_to ? `${fit[0].year_from}-${fit[0].year_to}` : fit.length === 1 ? String(fit[0].year_from) : `${Math.min(...fit.map((f) => f.year_from))}-${Math.max(...fit.map((f) => f.year_to))}`;
+  const name = listingName(it);
+  let title = [yrs, v.make, v.model, name, "OEM", pn].filter(Boolean).join(" ").replace(/\s+/g, " ");
+  if (title.length > 80) title = [yrs, v.make, v.model, name, pn].filter(Boolean).join(" ").slice(0, 80);
+  const cat = await suggestCategory(`${v.make} ${v.model} ${name}`, v).catch(() => null);
+  const aspectsWanted = cat ? await requiredAspects(cat.id, cat.tree) : [];
+  const aspects: Record<string, string[]> = { Brand: [String(v.make || "OEM")], "Manufacturer Part Number": [pn || "Does Not Apply"] };
+  if (/_l$/.test(it.part_key)) aspects["Placement on Vehicle"] = ["Left", ...(/head|mirror/.test(it.part_key) ? ["Front"] : /tail/.test(it.part_key) ? ["Rear"] : [])];
+  if (/_r$/.test(it.part_key)) aspects["Placement on Vehicle"] = ["Right", ...(/head|mirror/.test(it.part_key) ? ["Front"] : /tail/.test(it.part_key) ? ["Rear"] : [])];
+  if (pn) aspects["OE/OEM Part Number"] = [pn];
+  aspects["Type"] = aspects["Type"] || [];
+  const missing = aspectsWanted.filter((a: any) => a.required && !aspects[a.name]?.length);
+  if (missing.length && env("ANTHROPIC_API_KEY")) {
+    try {
+      const j = firstJson(await askClaude(`Fill eBay item specifics for this used OEM auto part listing. Title: "${title}". Vehicle: ${[v.year, v.make, v.model, v.trim, v.engine].filter(Boolean).join(" ")}.
+For each specific, pick from the allowed values when a list is given, otherwise write a short value. If unknown, use "Does Not Apply".
+Specifics: ${JSON.stringify(missing.map((m: any) => ({ name: m.name, allowed: m.values })))}
+Reply with JSON only: {"Name":"Value",...}`, 600)) || {};
+      for (const m of missing) if (j[m.name]) aspects[m.name] = [String(j[m.name])];
+    } catch { /* fill by hand */ }
+  }
+  for (const k of Object.keys(aspects)) if (!aspects[k].length) delete aspects[k];
+  const size = PART[it.part_key]?.[3] || "S";
+  const grade = it.grade || "B";
+  const condition = it.condition_text || GRADE_CONDITION[grade];
+  const fitLine = fit.map((f) => `${f.year_from}${f.year_to !== f.year_from ? "-" + f.year_to : ""} ${f.make} ${f.model}`).join(", ");
+  const description = `<h2>${esc(title)}</h2>
+<p><b>Genuine used OEM part</b> removed from a ${esc([v.year, v.make, v.model, v.trim].filter(Boolean).join(" "))}${v.engine ? " (" + esc(v.engine) + ")" : ""}.</p>
+${pn ? `<p><b>Part number:</b> ${esc(pn)}. Please match this number to your original part before buying.</p>` : `<p>Please compare the photos and connectors to your original part before buying.</p>`}
+<p><b>Fits:</b> ${esc(fitLine)}. Fitment is a guide: the part number is the best match.</p>
+<p><b>Condition:</b> ${esc(condition)}${it.ai_notes ? " " + esc(it.ai_notes) : ""}</p>
+<p>You will receive the exact item pictured. Stock # ${esc(it.sku || "")}.</p>`;
+  const draft = { title, price: it.list_price, category_id: cat?.id || "", category_name: cat?.name || "", aspects, aspect_hints: aspectsWanted, fit, generation: gen ? { year_from: gen.year_from, year_to: gen.year_to } : null, condition, description, size, package: PACKAGES[size] || PACKAGES.S };
+  await rest("PATCH", `pm_items?id=eq.${it.id}`, { draft }, "return=minimal");
+  return { draft };
+}
+const escRe = /[&<>"]/g;
+function esc(x: string) { return String(x ?? "").replace(escRe, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" } as any)[c]); }
+
+// ---------- Publish to eBay ----------
+async function publishItem(b: any) {
+  const it = await itemRow(b.id);
+  if (!it) return { error: "Part not found." };
+  const d = { ...(it.draft || {}), ...(b.draft || {}) };
+  const row = await ebayRow();
+  if (!row.refresh_token) return { error: "Connect your eBay account in Settings first." };
+  if (!row.fulfillment_policy_id || !row.payment_policy_id || !row.return_policy_id || !row.location_key) return { error: "Pick your shipping, payment and return policies and your ship-from ZIP in Settings → eBay selling first." };
+  if (!d.title || !d.category_id || !(Number(d.price) > 0)) return { error: "The draft needs a title, a category and a price." };
+  const photos = (it.photos || []).map((p: any) => p.url).filter(Boolean);
+  if (!photos.length) return { error: "Add at least one photo." };
+  const sku = it.sku;
+  try {
+    await sell("PUT", `/sell/inventory/v1/inventory_item/${enc(sku)}`, {
+      availability: { shipToLocationAvailability: { quantity: 1 } },
+      condition: "USED_EXCELLENT", conditionDescription: String(d.condition || "").slice(0, 1000),
+      product: { title: String(d.title).slice(0, 80), description: d.description, aspects: d.aspects || {}, imageUrls: photos.slice(0, 12), ...(it.part_numbers?.[0] ? { mpn: it.part_numbers[0] } : {}), brand: d.aspects?.Brand?.[0] },
+      packageWeightAndSize: d.package || PACKAGES.S,
+    });
+    const compat = [];
+    for (const f of d.fit || []) for (let y = Number(f.year_from); y <= Number(f.year_to) && compat.length < 300; y++) compat.push({ productFamilyProperties: { year: String(y), make: f.make, model: f.model }, notes: "" });
+    if (compat.length) {
+      try { await sell("PUT", `/sell/inventory/v1/inventory_item/${enc(sku)}/product_compatibility`, { compatibleProducts: compat }); }
+      catch { await sell("PUT", `/sell/inventory/v1/inventory_item/${enc(sku)}/product_compatibility`, { compatibleProducts: compat.map((c) => ({ compatibilityProperties: Object.entries(c.productFamilyProperties).map(([name, value]) => ({ name: name[0].toUpperCase() + name.slice(1), value })) })) }); }
+    }
+    const offer = {
+      sku, marketplaceId: "EBAY_US", format: "FIXED_PRICE", availableQuantity: 1, categoryId: String(d.category_id), listingDescription: d.description,
+      listingPolicies: { fulfillmentPolicyId: row.fulfillment_policy_id, paymentPolicyId: row.payment_policy_id, returnPolicyId: row.return_policy_id },
+      pricingSummary: { price: { value: Number(d.price).toFixed(2), currency: "USD" } }, merchantLocationKey: row.location_key,
+    };
+    let offerId = it.ebay_offer_id;
+    if (offerId) await sell("PUT", `/sell/inventory/v1/offer/${enc(offerId)}`, offer);
+    else offerId = (await sell("POST", "/sell/inventory/v1/offer", offer)).offerId;
+    await rest("PATCH", `pm_items?id=eq.${it.id}`, { ebay_offer_id: offerId, draft: d }, "return=minimal");
+    const pub = await sell("POST", `/sell/inventory/v1/offer/${enc(offerId)}/publish`, {});
+    await rest("PATCH", `pm_items?id=eq.${it.id}`, { ebay_listing_id: pub.listingId, status: "listed", listed_at: nowIso(), list_price: Number(d.price), listing_error: null, channel: "ebay" }, "return=minimal");
+    return { ok: true, listing_id: pub.listingId, url: `https://www.ebay.com/itm/${pub.listingId}` };
+  } catch (e) {
+    await rest("PATCH", `pm_items?id=eq.${it.id}`, { listing_error: (e as Error).message.slice(0, 500) }, "return=minimal");
+    return { error: (e as Error).message };
+  }
+}
+// Sold on eBay → mark it sold here, with the real price
+async function syncOrders() {
+  const row = await ebayRow();
+  if (!row.refresh_token) return { skipped: true };
+  if (row.last_order_sync && Date.now() - new Date(row.last_order_sync).getTime() < 15 * 60_000) return { skipped: true };
+  const since = new Date(new Date(row.last_order_sync || Date.now() - 14 * 864e5).getTime() - 864e5).toISOString();
+  const d = await sell("GET", `/sell/fulfillment/v1/order?filter=${enc(`creationdate:[${since}..]`)}&limit=200`);
+  let n = 0;
+  for (const o of d.orders || []) for (const li of o.lineItems || []) {
+    if (!li.sku) continue;
+    const it = (await rest("GET", `pm_items?sku=eq.${enc(li.sku)}&select=id,status`))?.[0];
+    if (!it || it.status === "sold") continue;
+    await rest("PATCH", `pm_items?id=eq.${it.id}`, { status: "sold", sold_price: Number(li.total?.value ?? li.lineItemCost?.value ?? 0) || null, sold_at: o.creationDate || nowIso(), channel: "ebay" }, "return=minimal");
+    n++;
+  }
+  await rest("PATCH", "pm_ebay?id=eq.1", { last_order_sync: nowIso() }, "return=minimal");
+  return { sold: n };
+}
+
 async function recomputeAll() {
   const { part_min } = await settings();
   const plats = (await rest("GET", "pm_vehicles?status=eq.ready&select=platform")) || [];
@@ -1230,6 +1539,11 @@ async function recomputeAll() {
 
 export async function handle(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+  if (req.method === "GET") {
+    const u = new URL(req.url);
+    if (u.searchParams.has("code") || u.searchParams.has("error")) return ebayOauthCallback(u);
+    return json({ ok: true, app: "QuickPull" });
+  }
   if (req.method !== "POST") return json({ error: "Use POST." }, 405);
   const body = await req.json().catch(() => ({}));
   try {
@@ -1255,6 +1569,14 @@ export async function handle(req: Request): Promise<Response> {
       case "save_generation": return owner ? json(await saveGeneration(body)) : ownerOnly();
       case "lookup_generation": return owner ? json(await lookupGenerations(String(body.make || ""), String(body.model || ""), true)) : ownerOnly();
       case "fastest": return owner ? json(await fastestSellers(body)) : ownerOnly();
+      case "analyze_photos": return owner ? json(await analyzePhotos(Number(body.id))) : ownerOnly();
+      case "confirm_item": return owner ? json(await confirmItem(body)) : ownerOnly();
+      case "ebay_connect": return owner ? json(await ebayConnectUrl(String(body.return_url || ""))) : ownerOnly();
+      case "ebay_status": return owner ? json(await ebaySellerStatus()) : ownerOnly();
+      case "ebay_setup": return owner ? json(await ebaySellerSetup(body)) : ownerOnly();
+      case "listing_draft": return owner ? json(await listingDraft(Number(body.id))) : ownerOnly();
+      case "publish": return owner ? json(await publishItem(body)) : ownerOnly();
+      case "sync_orders": return owner ? json(await syncOrders()) : ownerOnly();
       case "part_number": return owner ? json(await partNumberInfo(String(body.part_number || ""))) : ownerOnly();
       case "model_sales": return owner ? json(await modelSales(body.vehicle || {})) : ownerOnly();
       case "recompute": return owner ? json(await recomputeAll()) : ownerOnly();
