@@ -152,7 +152,7 @@ const RULES: [string, RegExp][] = [
 // Too big to ship cheaply, restricted, or not a part we sell. Only checked when no tracked part matched.
 const BIG = /\b(engine (assembly|motor)|long block|short block|motor assembly|transmission|transaxle|\bdoor (shell|assembly|panel)|\b(front|rear) door\b|bumper|hood\b|fender|quarter panel|trunk lid|lift ?gate|tail ?gate|seats?\b(?! ?(belt|entertainment|switch|module|heater|heat|motor|track|buckle|control|memory))|\bwheels?\b|\brims?\b|\btires?\b|axle|differential|sub ?frame|radiator|condenser|windshield|glass|strut|shocks?\b|control arm|knuckle|spindle|exhaust|catalytic|converter|muffler|dashboard|dash panel|air ?bags?|srs|headliner|carpet|roof\b|frame\b|core support|grille?\b|steering (column|rack|gear)|compressor|alternator|starter|fuel tank|gas tank|cylinder head|intake manifold|turbo|supercharger|whole car|vehicle\b)/;
 // Not a used OEM part, or not in usable shape.
-const JUNK = /\b(aftermarket|replacement|for parts|parts only|not working|non[- ]?working|broken|cracked|damaged|as[- ]?is|untested|core\b|repair|read desc\w*|salvage|non[- ]?oem|brand new|new in box|nib\b|reman\w*|rebuilt|refurb\w*|service\b|mail[- ]?in|you send|send us|cloning|clone|depo\b|tyc\b|dorman|spyder|anzo|morimoto|amerilite|eagle eyes|sherman|kool vue|garage[- ]?pro|fit system|unique imports|a-premium|apdty|cardone|standard motor|spectra premium|evan[- ]?fischer|labwork|bapmic|cciyu)\b/;
+const JUNK = /\b(aftermarket|replacement|for parts|parts only|not working|non[- ]?working|broken|cracked|damaged|as[- ]?is|untested|core\b|repair|read desc\w*|salvage|non[- ]?oem|brand new|new in box|nib\b|reman\w*|rebuilt|refurb\w*|service\b|mail[- ]?in|you send|send us|cloning|clone|depo\b|tyc\b|dorman|spyder|anzo|morimoto|amerilite|eagle eyes|sherman|kool vue|garage[- ]?pro|fit system|unique imports|a-premium|apdty|cardone|standard motor|spectra premium|evan[- ]?fischer|labwork|bapmic|cciyu|goodyear|bridgestone|firestone|michelin|pirelli|hankook|cooper tires?|general tire|holley|edelbrock|quick fuel|lund|flowmaster|kooks|hooker headers?|weathertech|husky liners)\b/;
 const NOT_PART = /\b(lot of \d+|manual|owner'?s|brochure|toy|model car|diecast|sticker|decal|cover only|floor mats?|key chain|keychain)\b/;
 
 export function classify(title: string): string | null {
@@ -227,7 +227,7 @@ type Listing = { title: string; price: number; qty?: number; ship?: number | nul
 export function aggregate(listings: Listing[], v: { make?: string; model?: string }, opts: { keepTracked: boolean; requireModel?: boolean; minDiscovered?: number }) {
   const groups = new Map<string, { prices: number[]; qty: number; titles: string[]; name?: string }>();
   const excluded = { junk: 0, big: 0, other_vehicle: 0, too_few: 0 };
-  const modelWord = String(v.model || "").toLowerCase().split(/[\s-]+/)[0];
+  const mWords = modelWords(String(v.model || ""));
   const add = (key: string, l: Listing, w = 1, name?: string) => {
     const g = groups.get(key) || { prices: [], qty: 0, titles: [], name };
     for (let i = 0; i < Math.max(1, Math.round(l.qty || 1)); i++) g.prices.push(l.price);
@@ -237,7 +237,7 @@ export function aggregate(listings: Listing[], v: { make?: string; model?: strin
   };
   for (const l of listings) {
     const tl = l.title.toLowerCase();
-    if (opts.requireModel && modelWord && !tl.includes(modelWord)) { excluded.other_vehicle++; continue; }
+    if (opts.requireModel && !titleHasModel(tl, mWords)) { excluded.other_vehicle++; continue; }
     if (isJunk(l.title)) { excluded.junk++; continue; }
     const k = classify(l.title) || (l.category ? classify(l.category) : null);
     if (k) {
@@ -834,7 +834,7 @@ async function platformData(platform: string) {
 
 // ---------- Every sale you paste is kept: small parts feed pull sheets, large parts are saved for later ----------
 const LARGE: [string, string, RegExp][] = [
-  ["engine", "Engine assembly", /\b(engine|motor) (assembly|assy)|\blong block|\bshort block|\bengine\b(?! (control|computer|module|wiring|harness|mount|cover|sensor))|\bmotor \d\.\d/],
+  ["engine", "Engine assembly", /\b(engine|motor) (assembly|assy)|\blong block|\bshort block|\bengine\b(?! (control|computer|module|wiring|harness|mount|cover|sensor))|\bmotor \d\.\d|\d\.\d ?l\b.{0,40}\bmotor\b|\bmotor\b.{0,40}\d+k? ?miles|\bmoney back\b|\blifetime warranty\b/],
   ["transmission", "Transmission", /\btransmission\b(?! (control|computer|module|mount|cooler|line|solenoid|valve body))|\btransaxle/],
   ["transfer_case", "Transfer case", /\btransfer case\b(?! (motor|module|switch))/],
   ["differential", "Differential / axle assembly", /\bdifferential|\b(rear|front) axle (assembly|housing)|\bcarrier assembly/],
@@ -880,13 +880,41 @@ export function saleType(title: string, ship?: number | null, v: any = {}) {
 }
 export const modelKey = (v: any) => platformKey({ make: v.make, model: v.model, year: "" }).replace(/\|$/, "");
 
+// Words a listing title must contain (any one) to count for this model.
+// "Caravan/Grand Caravan" → caravan; "P - Series" → p30, p20…; "E-Class" → e320, e430…; one-letter names never match everything.
+const MODEL_ALIASES: Record<string, string[]> = {
+  "p-series": ["p30", "p20", "p-30", "p-20", "p series", "p-series", "step van", "stepvan"],
+  "g-series": ["g10", "g20", "g30", "g-10", "g-20", "g-30", "chevy van", "g series", "g-series"],
+  "c/k": ["c1500", "k1500", "c2500", "k2500", "c3500", "k3500", "silverado", "sierra"],
+  "e-class": ["e-class", "e class", "e320", "e300", "e350", "e430", "e500", "e55", "w210", "w211", "w212"],
+  "c-class": ["c-class", "c class", "c230", "c240", "c280", "c300", "c320", "w203", "w204"],
+  "s-class": ["s-class", "s class", "s430", "s500", "s550", "w220", "w221"],
+};
+export function modelWords(model: string) {
+  const m = String(model || "").toLowerCase().replace(/\s*-\s*/g, "-").trim();
+  if (!m) return [];
+  if (MODEL_ALIASES[m]) return MODEL_ALIASES[m];
+  const out = new Set<string>();
+  for (const alt of m.split("/")) {
+    const words = alt.replace(/\(.*?\)/g, " ").split(/\s+/).filter(Boolean);
+    // two-word names must match whole ("grand cherokee", not every Cherokee; "town car")
+    const main = words.length > 1 ? words.join(" ") : words[0];
+    if (main && main.length >= 2) {
+      out.add(main);
+      if (/[- ]/.test(main)) { out.add(main.replace(/[- ]/g, "")); out.add(main.replace(/-/g, " ")); out.add(main.replace(/ /g, "-")); }
+    }
+  }
+  return [...out];
+}
+// short names ("CL", "300", "MKT") must be a whole word, so "cl" doesn't match "cluster"
+export const titleHasModel = (title: string, words: string[]) => { if (!words.length) return true; const t = title.toLowerCase(); return words.some((w) => (w.length <= 3 ? new RegExp(`(^|[^a-z0-9])${w.replace(/[^a-z0-9]/g, "\\$&")}([^a-z0-9]|$)`).test(t) : t.includes(w))); };
 function readPaste(text: string, v: any) {
   const listings = parsePaste(text);
-  const modelWord = String(v.model || "").toLowerCase().split(/[\s-]+/)[0];
+  const words = modelWords(v.model);
   const excluded = { junk: 0, other_vehicle: 0, airbag_or_unknown: 0 };
   const sales: (Listing & { type: { key: string; name: string; size: string } })[] = [];
   for (const l of listings) {
-    if (modelWord && !l.title.toLowerCase().includes(modelWord)) { excluded.other_vehicle++; continue; }
+    if (!titleHasModel(l.title, words)) { excluded.other_vehicle++; continue; }
     if (isJunk(l.title)) { excluded.junk++; continue; }
     const type = saleType(l.title, l.ship, v);
     if (!type) { excluded.airbag_or_unknown++; continue; }
